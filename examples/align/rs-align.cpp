@@ -12,11 +12,81 @@
 #include <algorithm>
 #include <cstring>
 
+// #define SIMPLE_TEST
+
 void render_slider(rect location, float& clipping_dist);
 void remove_background(rs2::video_frame& other, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist);
 float get_depth_scale(rs2::device dev);
 rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams);
 bool profile_changed(const std::vector<rs2::stream_profile>& current, const std::vector<rs2::stream_profile>& prev);
+
+class Vector3
+{
+	static constexpr double uZero = 1e-6;
+    float mWidthRange = 1.0;
+    float mHeightRange = 1.0;
+public:
+	float x, y, z;
+
+	Vector3() :x(0), y(0), z(0) {};
+	Vector3(float x1, float y1, float z1) :x(x1), y(y1), z(z1) {};
+    Vector3(float x1, float y1, float z1, float width_range, float height_range)
+        :x(x1/width_range), y(y1/height_range), z(z1),  mWidthRange(width_range), mHeightRange(height_range){};
+	~Vector3() {};
+	void operator=(const Vector3 &v)
+	{
+		x = v.x;
+		y = v.y;
+		z = v.z;
+	};
+	Vector3 operator+(const Vector3 &v)
+	{
+		return Vector3(x + v.x, y + v.y, z + v.z);
+	};
+	Vector3 operator-(const Vector3 &v) 
+	{
+		return Vector3(x - v.x, y - v.y, z - v.z);
+	};
+	float dot(const Vector3 &v) { return x * v.x + y * v.y + z * v.z; };
+	float length() { return sqrtf(dot(*this)); };
+    void amplifiy(const float& gain)
+	{
+		// x = x * gain;
+		// y = y * gain;
+		z = z * gain;
+	};
+	void normalize()
+	{
+		float len = length();
+		if (len < uZero)
+		{
+			len = 1.0f;
+		}
+		len = 1.0f / len;
+
+		x *= len;
+		y *= len;
+		z *= len;
+	};
+    // remap to 0.0~1.0
+	void remap()
+	{
+		x = x * 0.5 + 0.5;
+		y = y * 0.5 + 0.5;
+		z = z * 0.5 + 0.5;
+	};
+	Vector3 crossProduct(const Vector3 &v)
+	{
+		return Vector3(
+			y * v.z - z * v.y,
+			z * v.x - x * v.z,
+			x * v.y - y * v.x);
+	};
+	void printVec3()
+	{
+		std::cout << "(" << x << ", " << y << ", " << z << ")" << std::endl;
+	};
+};
 
 int main(int argc, char * argv[]) try
 {
@@ -185,23 +255,93 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
     int height = other_frame.get_height();
     int other_bpp = other_frame.get_bytes_per_pixel();
 
+    auto get_pixel_depth = [&](const int& _x, const int& _y, const float& gain = 1.0f)
+	{
+		return depth_scale * p_depth_frame[(_y * width) + _x] * gain;
+	};
+
+    static int range = 255;
+
+#ifdef SIMPLE_TEST
+	Vector3 t(100, 99, 0.9);
+	Vector3 l(99, 100, 0.9);
+	Vector3 c(100, 100, 1.0);
+	Vector3 normal = (l - c).crossProduct(t - c);
+	printf("original   [%f,%f,%f] length(%f)\n", normal.x, normal.y, normal.z, normal.length());
+
+	normal.normalize();
+	printf("normalized [%f,%f,%f] length(%f)\n", normal.x, normal.y, normal.z, normal.length());
+
+	normal.remap();
+	printf("remapped   [%f,%f,%f] length(%f)\n", normal.x, normal.y, normal.z, normal.length());
+
+	Vector3 rgb(normal.x*range, normal.y*range, normal.z*range);
+	printf("rgb   [%f,%f,%f]\n", rgb.x, rgb.y, rgb.z);
+#endif
+
     #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
-    for (int y = 0; y < height; y++)
+    for (int y = 1; y < height; y++)
     {
         auto depth_pixel_index = y * width;
-        for (int x = 0; x < width; x++, ++depth_pixel_index)
+        for (int x = 1; x < width; x++, ++depth_pixel_index)
         {
             // Get the depth value of the current pixel
             auto pixels_distance = depth_scale * p_depth_frame[depth_pixel_index];
+            // Calculate the offset in other frame's buffer to current pixel
+            auto offset = depth_pixel_index * other_bpp;
 
             // Check if the depth value is invalid (<=0) or greater than the threashold
             if (pixels_distance <= 0.f || pixels_distance > clipping_dist)
             {
-                // Calculate the offset in other frame's buffer to current pixel
-                auto offset = depth_pixel_index * other_bpp;
-
-                // Set pixel to "background" color (0x999999)
-                std::memset(&p_other_frame[offset], 0x99, other_bpp);
+                // Set pixel to "background" color (0x00)
+                std::memset(&p_other_frame[offset], 0x00, other_bpp);
+            }
+            else
+            {
+#ifndef SIMPLE_TEST
+                // Amplify the depth value, ohterwise the depth variation of neighbor pixels are too small,
+                // and the calculated normal will be (0,0,1) for most cases.
+                static float depth_gain = 1000.0f;
+                Vector3 t(x,     y - 1, get_pixel_depth(x,     y - 1, depth_gain), width, height);
+                Vector3 l(x - 1, y,     get_pixel_depth(x - 1, y,     depth_gain), width, height);
+                Vector3 c(x,     y,     get_pixel_depth(x,     y,     depth_gain), width, height);
+                Vector3 normal = (l - c).crossProduct(t - c);
+                
+                Vector3 rgb(0,0,0);
+                if( x == width/2 && y == height/2 )
+                {
+                    // print center pixel information
+                    printf("[%d,%d] t[%f,%f,%f] l[%f,%f,%f] c[%f,%f,%f] depth_scale[%f]\n", x, y,
+                        t.x, t.y, t.z,
+                        l.x, l.y, l.z,
+                        c.x, c.y, c.z,
+                        depth_scale
+                    );
+                    printf("[%d,%d]original   [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
+                    
+                    // normal.amplifiy(1000000.0);
+                    // printf("[%d,%d]amplify    [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
+                    
+                    normal.normalize();
+                    printf("[%d,%d]normalize  [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
+                    
+                    normal.remap();
+                    printf("[%d,%d]remapped   [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
+                    
+                    rgb = Vector3(normal.x*range, normal.y*range, normal.z*range);
+                    printf("[%d,%d]rgb        [%f,%f,%f]\n", x, y, rgb.x, rgb.y, rgb.z);
+                }
+                else
+                {
+                    normal.normalize();
+                    normal.remap();
+                    rgb = Vector3(normal.x*range, normal.y*range, normal.z*range);
+                }
+#endif
+                // R, G, B channel:
+                std::memset(&p_other_frame[offset], rgb.x, 1);
+                std::memset(&p_other_frame[offset + 1], rgb.y, 1);
+                std::memset(&p_other_frame[offset + 2], rgb.z, 1);
             }
         }
     }
