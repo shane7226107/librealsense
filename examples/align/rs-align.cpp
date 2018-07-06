@@ -387,17 +387,16 @@ void draw_original_depthmap(rs2::video_frame& other_frame, const rs2::depth_fram
     // draw normal map from original depthmap
     width = depth_frame.get_width();
     height = depth_frame.get_height();
-    
+
     #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
     for (int y = 1; y < height; y++)
     {
-        auto depth_pixel_index = y * width;
-        for (int x = 1; x < width; x++, ++depth_pixel_index)
+        for (int x = 1; x < width; x++)
         {
             // Get the depth value of the current pixel
-            auto pixels_distance = depth_scale * p_depth_frame[depth_pixel_index];
+            auto pixels_distance = get_pixel_depth(x,y);
             // Calculate the offset in other frame's buffer to current pixel
-            auto offset = depth_pixel_index * other_bpp;
+            auto offset = (y * width + x) * other_bpp;
 
             // Check if the depth value is invalid (<=0) or greater than the threashold
             if (pixels_distance <= 0.0f || pixels_distance > clipping_dist)
@@ -410,9 +409,9 @@ void draw_original_depthmap(rs2::video_frame& other_frame, const rs2::depth_fram
                 // Amplify the depth value, ohterwise the depth variation of neighbor pixels are too small,
                 // and the normal vector will be (0,0,1) for most cases.
                 static float depth_gain = 1000.0f;
-                Vector3 t(x,     y - 1, get_pixel_depth(x,     y - 1, depth_gain), width, height);
-                Vector3 l(x - 1, y,     get_pixel_depth(x - 1, y,     depth_gain), width, height);
-                Vector3 c(x,     y,     get_pixel_depth(x,     y,     depth_gain), width, height);
+                Vector3 t(x,     y - 1, get_pixel_depth(x,     y - 1, depth_gain));
+                Vector3 l(x - 1, y,     get_pixel_depth(x - 1, y,     depth_gain));
+                Vector3 c(x,     y,     get_pixel_depth(x,     y,     depth_gain));
                 Vector3 normal = (l - c).crossProduct(t - c);
                 
                 Vector3 rgb(0,0,0);
