@@ -11,14 +11,17 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 // #define SIMPLE_TEST
+#define MAX_LOOP_COUNT 20
 
 void render_slider(rect location, float& clipping_dist);
 void remove_background(rs2::video_frame& other, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist);
 float get_depth_scale(rs2::device dev);
 rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams);
 bool profile_changed(const std::vector<rs2::stream_profile>& current, const std::vector<rs2::stream_profile>& prev);
+void dump_depth_map(const rs2::depth_frame& depth_frame, float depth_scale);
 
 class Vector3
 {
@@ -93,7 +96,7 @@ int main(int argc, char * argv[]) try
     // Create and initialize GUI related objects
     window app(1280, 720, "CPP - Align Example"); // Simple window handling
     ImGui_ImplGlfw_Init(app, false);      // ImGui library intializition
-    rs2::colorizer c;                          // Helper to colorize depth images
+    rs2::colorizer colorer;                     // Helper to colorize depth images
     texture renderer;                     // Helper for renderig images
 
     // Create a pipeline to easily configure and start the camera
@@ -117,7 +120,9 @@ int main(int argc, char * argv[]) try
     rs2::align align(align_to);
 
     // Define a variable for controlling the distance to clip
-    float depth_clipping_distance = 1.f;
+    float depth_clipping_distance = 1.0f;
+
+    int loop_count = 0;
 
     while (app) // Application still alive?
     {
@@ -167,13 +172,13 @@ int main(int argc, char * argv[]) try
 
         // The example also renders the depth frame, as a picture-in-picture
         // Calculating the position to place the depth frame in the window
-        rect pip_stream{ 0, 0, w / 5, h / 5 };
+        rect pip_stream{ 0, 0, w / 3, h / 3 };
         pip_stream = pip_stream.adjust_ratio({ static_cast<float>(aligned_depth_frame.get_width()),static_cast<float>(aligned_depth_frame.get_height()) });
-        pip_stream.x = altered_other_frame_rect.x + altered_other_frame_rect.w - pip_stream.w - (std::max(w, h) / 25);
-        pip_stream.y = altered_other_frame_rect.y + altered_other_frame_rect.h - pip_stream.h - (std::max(w, h) / 25);
+        pip_stream.x = altered_other_frame_rect.x + altered_other_frame_rect.w - pip_stream.w + 100;
+        pip_stream.y = altered_other_frame_rect.y + altered_other_frame_rect.h - pip_stream.h;
 
         // Render depth (as picture in pipcture)
-        renderer.upload(c(aligned_depth_frame));
+        renderer.upload(colorer(aligned_depth_frame));
         renderer.show(pip_stream);
 
         // Using ImGui library to provide a slide controller to select the depth clipping distance
@@ -181,6 +186,13 @@ int main(int argc, char * argv[]) try
         render_slider({ 5.f, 0, w, h }, depth_clipping_distance);
         ImGui::Render();
 
+        printf("loop(%d/%d)\n", loop_count, MAX_LOOP_COUNT);
+        if( loop_count == MAX_LOOP_COUNT )
+        {
+            dump_depth_map(aligned_depth_frame, depth_scale);
+            break;
+        }
+        ++loop_count;
     }
     return EXIT_SUCCESS;
 }
@@ -291,7 +303,7 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
             auto offset = depth_pixel_index * other_bpp;
 
             // Check if the depth value is invalid (<=0) or greater than the threashold
-            if (pixels_distance <= 0.f || pixels_distance > clipping_dist)
+            if (pixels_distance <= 0.0f || pixels_distance > clipping_dist)
             {
                 // Set pixel to "background" color (0x00)
                 std::memset(&p_other_frame[offset], 0x00, other_bpp);
@@ -300,7 +312,7 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
             {
 #ifndef SIMPLE_TEST
                 // Amplify the depth value, ohterwise the depth variation of neighbor pixels are too small,
-                // and the calculated normal will be (0,0,1) for most cases.
+                // and the normal vector will be (0,0,1) for most cases.
                 static float depth_gain = 1000.0f;
                 Vector3 t(x,     y - 1, get_pixel_depth(x,     y - 1, depth_gain), width, height);
                 Vector3 l(x - 1, y,     get_pixel_depth(x - 1, y,     depth_gain), width, height);
@@ -319,9 +331,6 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
                     );
                     printf("[%d,%d]original   [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
                     
-                    // normal.amplifiy(1000000.0);
-                    // printf("[%d,%d]amplify    [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
-                    
                     normal.normalize();
                     printf("[%d,%d]normalize  [%f,%f,%f] length(%f)\n", x, y, normal.x, normal.y, normal.z, normal.length());
                     
@@ -338,6 +347,9 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
                     rgb = Vector3(normal.x*range, normal.y*range, normal.z*range);
                 }
 #endif
+                // remap 0.7~1.0 -> 0.0~1.0
+                // rgb.x = rgb.y = rgb.z = ((get_pixel_depth(x, y)-0.7)/0.3)*255.0;
+
                 // R, G, B channel:
                 std::memset(&p_other_frame[offset], rgb.x, 1);
                 std::memset(&p_other_frame[offset + 1], rgb.y, 1);
@@ -395,4 +407,67 @@ bool profile_changed(const std::vector<rs2::stream_profile>& current, const std:
         }
     }
     return false;
+}
+
+void dump_depth_map(const rs2::depth_frame& depth_frame, float depth_scale)
+{
+    printf("dump depthmap +\n");
+
+    const uint16_t* p_depth_frame = reinterpret_cast<const uint16_t*>(depth_frame.get_data());
+
+    int width = depth_frame.get_width();
+    int height = depth_frame.get_height();
+
+    auto get_pixel_depth = [&](const int& _x, const int& _y, const float& gain = 1.0f)
+	{
+		return depth_scale * p_depth_frame[(_y * width) + _x] * gain;
+	};
+
+    printf("dump depthmap [%dx%d]\n", width, height);
+
+    float* depth_in_meter = new float[width*height];
+    int i = 0;
+    for (int y = 0; y < height; y++)
+    {
+        auto depth_pixel_index = y * width;
+        for (int x = 0; x < width; x++, ++depth_pixel_index)
+        {
+            depth_in_meter[i++] = depth_scale * p_depth_frame[depth_pixel_index];
+        }
+    }
+
+    char filename[128];
+    using namespace std::chrono;
+    milliseconds timestamp = duration_cast<milliseconds>(
+        system_clock::now().time_since_epoch()
+    );
+    snprintf(filename, sizeof(filename), "depthmap_meter_%d_%d_%d_%d.dat", width, height, sizeof(float), timestamp.count());
+
+    std::ofstream out(filename, std::ios::out | std::ios::binary);
+
+    if( !out )
+    {
+        printf("[E] Cannot open file!\n");
+        return;
+    }
+
+    out.write((char*)depth_in_meter, width*height*sizeof(float));
+    out.close();
+
+    // check
+    float* depth_in_meter_read = new float[width*height];
+    std::ifstream in(filename, std::ios::in | std::ios::binary);
+    in.read((char*)depth_in_meter_read, width*height*sizeof(float));
+    for(int i=0 ; i<width*height ; ++i)
+    {
+        if( depth_in_meter_read[i] != depth_in_meter[i] )
+        {
+            printf("[E] check file failed!\n");
+        }
+    }
+    printf("check file passed\n");
+
+    delete[] depth_in_meter;
+
+    printf("dump depthmap -\n");
 }
