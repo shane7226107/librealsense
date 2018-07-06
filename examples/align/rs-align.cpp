@@ -18,10 +18,12 @@
 
 void render_slider(rect location, float& clipping_dist);
 void remove_background(rs2::video_frame& other, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist);
+void draw_original_depthmap(rs2::video_frame& other, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist);
 float get_depth_scale(rs2::device dev);
 rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams);
 bool profile_changed(const std::vector<rs2::stream_profile>& current, const std::vector<rs2::stream_profile>& prev);
 void dump_depth_map(const rs2::depth_frame& depth_frame, float depth_scale);
+void find_camera_params(const std::vector<rs2::stream_profile>& streams);
 
 class Vector3
 {
@@ -124,6 +126,8 @@ int main(int argc, char * argv[]) try
 
     int loop_count = 0;
 
+    find_camera_params(profile.get_streams());
+
     while (app) // Application still alive?
     {
         // Using the align object, we block the application until a frameset is available
@@ -153,10 +157,12 @@ int main(int argc, char * argv[]) try
         {
             continue;
         }
+
         // Passing both frames to remove_background so it will "strip" the background
         // NOTE: in this example, we alter the buffer of the other frame, instead of copying it and altering the copy
         //       This behavior is not recommended in real application since the other frame could be used elsewhere
-        remove_background(other_frame, aligned_depth_frame, depth_scale, depth_clipping_distance);
+        // remove_background(other_frame, aligned_depth_frame, depth_scale, depth_clipping_distance);
+        draw_original_depthmap(other_frame, frameset.get_depth_frame(), depth_scale, depth_clipping_distance);
 
         // Taking dimensions of the window for rendering purposes
         float w = static_cast<float>(app.width());
@@ -185,7 +191,7 @@ int main(int argc, char * argv[]) try
         ImGui_ImplGlfw_NewFrame(1);
         render_slider({ 5.f, 0, w, h }, depth_clipping_distance);
         ImGui::Render();
-
+#if 0
         printf("loop(%d/%d)\n", loop_count, MAX_LOOP_COUNT);
         if( loop_count == MAX_LOOP_COUNT )
         {
@@ -193,6 +199,7 @@ int main(int argc, char * argv[]) try
             break;
         }
         ++loop_count;
+#endif
     }
     return EXIT_SUCCESS;
 }
@@ -320,7 +327,7 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
                 Vector3 normal = (l - c).crossProduct(t - c);
                 
                 Vector3 rgb(0,0,0);
-                if( x == width/2 && y == height/2 )
+                if( false /*x == width/2 && y == height/2*/ )
                 {
                     // print center pixel information
                     printf("[%d,%d] t[%f,%f,%f] l[%f,%f,%f] c[%f,%f,%f] depth_scale[%f]\n", x, y,
@@ -349,6 +356,69 @@ void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& de
 #endif
                 // remap 0.7~1.0 -> 0.0~1.0
                 // rgb.x = rgb.y = rgb.z = ((get_pixel_depth(x, y)-0.7)/0.3)*255.0;
+
+                // R, G, B channel:
+                std::memset(&p_other_frame[offset], rgb.x, 1);
+                std::memset(&p_other_frame[offset + 1], rgb.y, 1);
+                std::memset(&p_other_frame[offset + 2], rgb.z, 1);
+            }
+        }
+    }
+}
+
+void draw_original_depthmap(rs2::video_frame& other_frame, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist)
+{
+    const uint16_t* p_depth_frame = reinterpret_cast<const uint16_t*>(depth_frame.get_data());
+    uint8_t* p_other_frame = reinterpret_cast<uint8_t*>(const_cast<void*>(other_frame.get_data()));
+
+    // clear color image
+    int width = other_frame.get_width();
+    int height = other_frame.get_height();
+    int other_bpp = other_frame.get_bytes_per_pixel();
+    std::memset(p_other_frame, 0, width*height*other_bpp);
+
+    auto get_pixel_depth = [&](const int& _x, const int& _y, const float& gain = 1.0f)
+	{
+		return depth_scale * p_depth_frame[(_y * width) + _x] * gain;
+	};
+
+    static int range = 255;
+
+    // draw normal map from original depthmap
+    width = depth_frame.get_width();
+    height = depth_frame.get_height();
+    
+    #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
+    for (int y = 1; y < height; y++)
+    {
+        auto depth_pixel_index = y * width;
+        for (int x = 1; x < width; x++, ++depth_pixel_index)
+        {
+            // Get the depth value of the current pixel
+            auto pixels_distance = depth_scale * p_depth_frame[depth_pixel_index];
+            // Calculate the offset in other frame's buffer to current pixel
+            auto offset = depth_pixel_index * other_bpp;
+
+            // Check if the depth value is invalid (<=0) or greater than the threashold
+            if (pixels_distance <= 0.0f || pixels_distance > clipping_dist)
+            {
+                // Set pixel to "background" color (0x00)
+                std::memset(&p_other_frame[offset], 0x00, other_bpp);
+            }
+            else
+            {
+                // Amplify the depth value, ohterwise the depth variation of neighbor pixels are too small,
+                // and the normal vector will be (0,0,1) for most cases.
+                static float depth_gain = 1000.0f;
+                Vector3 t(x,     y - 1, get_pixel_depth(x,     y - 1, depth_gain), width, height);
+                Vector3 l(x - 1, y,     get_pixel_depth(x - 1, y,     depth_gain), width, height);
+                Vector3 c(x,     y,     get_pixel_depth(x,     y,     depth_gain), width, height);
+                Vector3 normal = (l - c).crossProduct(t - c);
+                
+                Vector3 rgb(0,0,0);
+                normal.normalize();
+                normal.remap();
+                rgb = Vector3(normal.x*range, normal.y*range, normal.z*range);
 
                 // R, G, B channel:
                 std::memset(&p_other_frame[offset], rgb.x, 1);
@@ -418,12 +488,7 @@ void dump_depth_map(const rs2::depth_frame& depth_frame, float depth_scale)
     int width = depth_frame.get_width();
     int height = depth_frame.get_height();
 
-    auto get_pixel_depth = [&](const int& _x, const int& _y, const float& gain = 1.0f)
-	{
-		return depth_scale * p_depth_frame[(_y * width) + _x] * gain;
-	};
-
-    printf("dump depthmap [%dx%d]\n", width, height);
+     printf("dump depthmap [%dx%d]\n", width, height);
 
     float* depth_in_meter = new float[width*height];
     int i = 0;
@@ -470,4 +535,29 @@ void dump_depth_map(const rs2::depth_frame& depth_frame, float depth_scale)
     delete[] depth_in_meter;
 
     printf("dump depthmap -\n");
+}
+
+void find_camera_params(const std::vector<rs2::stream_profile>& streams)
+{
+    for (rs2::stream_profile sp : streams)
+    {
+        rs2_stream profile_stream = sp.stream_type();
+        if (profile_stream == RS2_STREAM_COLOR)
+        {
+            printf("find color stream\n");
+            auto video_stream = sp.as<rs2::video_stream_profile>();
+            //If the stream is indeed a video stream, we can now simply call get_intrinsics()
+            rs2_intrinsics intrinsics = video_stream.get_intrinsics();
+
+            auto principal_point = std::make_pair(intrinsics.ppx, intrinsics.ppy);
+            auto focal_length = std::make_pair(intrinsics.fx, intrinsics.fy);
+            rs2_distortion model = intrinsics.model;
+
+            std::cout << "Principal Point         : " << principal_point.first << ", " << principal_point.second << std::endl;
+            std::cout << "Focal Length            : " << focal_length.first << ", " << focal_length.second << std::endl;
+            std::cout << "Distortion Model        : " << model << std::endl;
+            std::cout << "Distortion Coefficients : [" << intrinsics.coeffs[0] << "," << intrinsics.coeffs[1] << "," <<
+                intrinsics.coeffs[2] << "," << intrinsics.coeffs[3] << "," << intrinsics.coeffs[4] << "]" << std::endl;
+        }
+    }
 }
