@@ -61,7 +61,8 @@ public:
     void render(const rs2::video_frame& frame, const rect& r)
     {
         upload(frame);
-        show(r.adjust_ratio({ float(width), float(height) }));
+        stream = frame.get_profile().stream_type();
+        show(r.adjust_ratio({ float(width), float(height) }), rs2_stream_to_string(stream));
     }
 
     void upload(const rs2::video_frame& frame)
@@ -103,8 +104,8 @@ public:
     }
 
     GLuint get_gl_handle() { return gl_handle; }
-
-    void show(const rect& r) const
+    
+    void show(const rect& r, const char* text) const
     {
         if (!gl_handle)
             return;
@@ -120,7 +121,11 @@ public:
         glDisable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        draw_text((int)r.x + 15, (int)r.y + 20, rs2_stream_to_string(stream));
+        // draw_text((int)r.x + 15, (int)r.y + 20, rs2_stream_to_string(stream));
+        if(text)
+        {
+            draw_text((int)r.x + 15, (int)r.y + 20, text);
+        }
     }
 private:
     GLuint gl_handle = 0;

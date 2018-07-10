@@ -209,8 +209,8 @@ int main(int argc, char * argv[]) try
     printf("my playground\n");
     
     // Parameters
-    int W_win = 640;
-    int H_win = 480;
+    int W_win = 1280;
+    int H_win = 720;
     float depth_clipping_distance = 1.0f;
     int W_normal = 0;
     int H_normal = 0;
@@ -231,7 +231,7 @@ int main(int argc, char * argv[]) try
     rs2::stream_profile depth_stream_profile = get_depth_stream_profile(profile.get_streams());
     rs2::video_stream_profile depth_video_stream_profile = depth_stream_profile.as<rs2::video_stream_profile>();
     float depth_scale = get_depth_scale(profile.get_device());
-    
+  
     W_normal = depth_video_stream_profile.width();
     H_normal = depth_video_stream_profile.height();
     uint8_t* p_normal_data = new uint8_t[W_normal*H_normal*BPP_normal];
@@ -253,6 +253,9 @@ int main(int argc, char * argv[]) try
         depth_video_stream_profile.width(), depth_video_stream_profile.height(),
         W_normal, H_normal
     );
+
+    // Ohter init
+    rs2::colorizer colorer;
 
     int frame_number = 0;
     while (app) // Application still alive?
@@ -279,13 +282,32 @@ int main(int argc, char * argv[]) try
 
         float w = static_cast<float>(app.width());
         float h = static_cast<float>(app.height());
-        rect frame_rect{ 0, 0, w, h };
-        frame_rect = frame_rect.adjust_ratio({ static_cast<float>(normal_frame.get_width()),static_cast<float>(normal_frame.get_height()) });
+        
+        // draw normal map
+        rect normal_frame_rect{ 0, 0, w/3, h };
+        normal_frame_rect = normal_frame_rect.adjust_ratio({ static_cast<float>(normal_frame.get_width()),static_cast<float>(normal_frame.get_height()) });
+        // printf("normal_frame_rect[%.2f,%.2f,%.2fx%.2f]\n", normal_frame_rect.x, normal_frame_rect.y, normal_frame_rect.w, normal_frame_rect.h);
+        renderer.upload(normal_frame);
+        renderer.show(normal_frame_rect, "Normal Map");
 
-        renderer.render(normal_frame, frame_rect);
+        // draw depth frame
+        rect depth_frame_rect{ 0+normal_frame_rect.w, 0, w/3, h };
+        depth_frame_rect = depth_frame_rect.adjust_ratio({ static_cast<float>(depth_frame.get_width()),static_cast<float>(depth_frame.get_height()) });
+        // printf("depth_frame_rect[%.2f,%.2f,%.2fx%.2f]\n", depth_frame_rect.x, depth_frame_rect.y, depth_frame_rect.w, depth_frame_rect.h);
+        renderer.upload(colorer(depth_frame));
+        renderer.show(depth_frame_rect, "Depth Map");        
+
+        // draw color frame
+        rect color_frame_rect{ 0+normal_frame_rect.w+depth_frame_rect.w, 0, w/3, h };
+        color_frame_rect = color_frame_rect.adjust_ratio({ static_cast<float>(color_frame.get_width()),static_cast<float>(color_frame.get_height()) });
+        // printf("color_frame_rect[%.2f,%.2f,%.2fx%.2f]\n", color_frame_rect.x, color_frame_rect.y, color_frame_rect.w, color_frame_rect.h);
+        renderer.upload(color_frame);
+        renderer.show(color_frame_rect, "RGB");
 
         ++frame_number;
     }
+
+    delete[] p_normal_data;
     system("pause");
     return EXIT_SUCCESS;
 }
