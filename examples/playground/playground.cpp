@@ -128,7 +128,7 @@ rs2::stream_profile get_depth_stream_profile(const std::vector<rs2::stream_profi
     throw std::runtime_error("No depth stream available");
 }
 
-void draw_normal_map(uint8_t* p_normal_data, const int& width, const int& height, const int& bpp, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist)
+void make_normal_map(uint8_t* p_normal_data, const int& width, const int& height, const int& bpp, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist)
 {
     if( width != depth_frame.get_width() ||
         height != depth_frame.get_height()
@@ -236,6 +236,7 @@ int main(int argc, char * argv[]) try
     H_normal = depth_video_stream_profile.height();
     uint8_t* p_normal_data = new uint8_t[W_normal*H_normal*BPP_normal];
     rs2::software_device dev; // Create software-only device
+    
     auto normal_map_sensor = dev.add_sensor("NormalMap"); // Define single sensor
     // Use color stream profile for proper RGB channel settings, however this stream is use to display normal map
     auto normal_map_stream = normal_map_sensor.add_video_stream({
@@ -256,6 +257,7 @@ int main(int argc, char * argv[]) try
 
     // Ohter init
     rs2::colorizer colorer;
+    rs2::align aligner(RS2_STREAM_COLOR); // Depth align to Color
 
     int frame_number = 0;
     while (app) // Application still alive?
@@ -263,15 +265,18 @@ int main(int argc, char * argv[]) try
         // printf("[%d]\n", frame_number);
         rs2::frameset frameset = pipe.wait_for_frames();
         rs2::video_frame color_frame = frameset.get_color_frame();
-        rs2::video_frame depth_frame = frameset.get_depth_frame();
-        if ( !color_frame || !depth_frame )
+        rs2::video_frame raw_depth_frame = frameset.get_depth_frame();
+        if ( !color_frame || !raw_depth_frame )
         {
             continue;
         }
 
-        draw_normal_map(p_normal_data, W_normal, H_normal, BPP_normal, depth_frame, depth_scale, depth_clipping_distance);
+        make_normal_map(p_normal_data, W_normal, H_normal, BPP_normal, raw_depth_frame, depth_scale, depth_clipping_distance);
         // manually submit sw frame to sw sensor
         update_sw_sensor(normal_map_sensor, normal_map_stream, frame_number, p_normal_data, W_normal, H_normal, BPP_normal);
+
+        auto processed = aligner.process(frameset);
+        rs2::depth_frame aligned_depth_frame = processed.get_depth_frame();
 
         rs2::frameset frameset_sw = sync.wait_for_frames();
         rs2::video_frame normal_frame = frameset_sw.get_color_frame();
@@ -283,26 +288,29 @@ int main(int argc, char * argv[]) try
         float w = static_cast<float>(app.width());
         float h = static_cast<float>(app.height());
         
-        // draw normal map
-        rect normal_frame_rect{ 0, 0, w/3, h };
-        normal_frame_rect = normal_frame_rect.adjust_ratio({ static_cast<float>(normal_frame.get_width()),static_cast<float>(normal_frame.get_height()) });
-        // printf("normal_frame_rect[%.2f,%.2f,%.2fx%.2f]\n", normal_frame_rect.x, normal_frame_rect.y, normal_frame_rect.w, normal_frame_rect.h);
-        renderer.upload(normal_frame);
-        renderer.show(normal_frame_rect, "Normal Map");
+        int showCount = 4;
+        float showOffset = 0;
+        auto addShow = [&](rs2::video_frame* _vFrame, const char* _str, bool _isDepth = false)
+        {
+            rect frame_rect{showOffset, 0, w/showCount, h};
+            // printf("showOffset[%.2f] showframe_rect[%.2f,%.2f,%.2fx%.2f]\n", showOffset, frame_rect.x, frame_rect.y, frame_rect.w, frame_rect.h);            
+            frame_rect = frame_rect.adjust_ratio({ static_cast<float>(_vFrame->get_width()),static_cast<float>(_vFrame->get_height()) });
+            if(_isDepth)
+            {
+                renderer.upload(colorer(*_vFrame));
+            }
+            else
+            {
+                renderer.upload(*_vFrame);
+            }
+            renderer.show(frame_rect, _str);
+            showOffset += frame_rect.w;
+        };
 
-        // draw depth frame
-        rect depth_frame_rect{ 0+normal_frame_rect.w, 0, w/3, h };
-        depth_frame_rect = depth_frame_rect.adjust_ratio({ static_cast<float>(depth_frame.get_width()),static_cast<float>(depth_frame.get_height()) });
-        // printf("depth_frame_rect[%.2f,%.2f,%.2fx%.2f]\n", depth_frame_rect.x, depth_frame_rect.y, depth_frame_rect.w, depth_frame_rect.h);
-        renderer.upload(colorer(depth_frame));
-        renderer.show(depth_frame_rect, "Depth Map");        
-
-        // draw color frame
-        rect color_frame_rect{ 0+normal_frame_rect.w+depth_frame_rect.w, 0, w/3, h };
-        color_frame_rect = color_frame_rect.adjust_ratio({ static_cast<float>(color_frame.get_width()),static_cast<float>(color_frame.get_height()) });
-        // printf("color_frame_rect[%.2f,%.2f,%.2fx%.2f]\n", color_frame_rect.x, color_frame_rect.y, color_frame_rect.w, color_frame_rect.h);
-        renderer.upload(color_frame);
-        renderer.show(color_frame_rect, "RGB");
+        addShow(&normal_frame, "Normal Map");
+        addShow(&raw_depth_frame, "Depth Map", true);
+        addShow(&color_frame, "RGB");
+        addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame), "Aligned Depth Map", true);
 
         ++frame_number;
     }
