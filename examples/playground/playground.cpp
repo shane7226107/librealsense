@@ -326,11 +326,12 @@ int main(int argc, char * argv[]) try
         float w = static_cast<float>(app.width());
         float h = static_cast<float>(app.height());
         
-        int   showCount  = 5;
-        float showOffset = 0;
-        auto addShow = [&](rs2::video_frame* _vFrame, const char* _str, bool _isDepth = false)
+        int   rowCount  = 2;
+        int   colCount  = 3;
+        float showOffset[2] = {0.0, 0.0};
+        auto addShow = [&](rs2::video_frame* _vFrame, int row, const char* _str, bool _isDepth = false)
         {
-            rect frame_rect{showOffset, 0, w/showCount, h};
+            rect frame_rect{showOffset[row], (h/rowCount)*row, w/colCount, h/rowCount};
             // printf("showOffset[%.2f] showframe_rect[%.2f,%.2f,%.2fx%.2f]\n", showOffset, frame_rect.x, frame_rect.y, frame_rect.w, frame_rect.h);            
             frame_rect = frame_rect.adjust_ratio({ static_cast<float>(_vFrame->get_width()),static_cast<float>(_vFrame->get_height()) });
             if(_isDepth)
@@ -342,14 +343,17 @@ int main(int argc, char * argv[]) try
                 renderer.upload(*_vFrame);
             }
             renderer.show(frame_rect, _str);
-            showOffset += frame_rect.w;
+            showOffset[row] += frame_rect.w;
         };
 
-        addShow(&normal_frame,      "Normal Map");
-        addShow(&raw_depth_frame,   "Depth Map", true);
-        addShow(&color_frame,       "RGB");
-        addShow(static_cast<rs2::video_frame*>(&aligned_normal_frame),  "Aligned Normal Map");
-        addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame),   "Aligned Depth Map", true);
+        // row 0
+        addShow(&normal_frame,      0, "Normal Map");
+        addShow(&raw_depth_frame,   0, "Depth Map", true);
+
+        // row 1
+        addShow(static_cast<rs2::video_frame*>(&aligned_normal_frame),  1, "Aligned Normal Map");
+        addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame),   1, "Aligned Depth Map", true);
+        addShow(&color_frame,       1, "RGB");
 
         ++frame_number;
     }
