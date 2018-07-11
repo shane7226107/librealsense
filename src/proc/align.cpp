@@ -32,7 +32,7 @@ namespace librealsense
                     rs2_deproject_pixel_to_point(depth_point, &depth_intrin, depth_pixel, depth);
                     rs2_transform_point_to_point(other_point, &depth_to_other, depth_point);
                     rs2_project_point_to_pixel(other_pixel, &other_intrin, other_point);
-                    const int other_x0 = static_cast<int>(other_pixel[0] + 0.5f);
+                    const int other_x0 = static_cast<int>(other_pixel[0] + 0.5f); //rounding
                     const int other_y0 = static_cast<int>(other_pixel[1] + 0.5f);
 
                     // Map the bottom-right corner of the depth pixel onto the other image
@@ -59,20 +59,126 @@ namespace librealsense
         }
     }
 
-    void align_z_to_other(byte* z_aligned_to_other, const uint16_t* z_pixels, float z_scale, const rs2_intrinsics& z_intrin, const rs2_extrinsics& z_to_other, const rs2_intrinsics& other_intrin)
+    // Inverse Mapping with nearest interpolation
+    template<class GET_DEPTH, class TRANSFER_PIXEL>
+    void align_images_nearest(
+        const rs2_intrinsics& depth_intrin,
+        const rs2_extrinsics& other_to_depth,
+        const rs2_intrinsics& other_intrin,
+        GET_DEPTH get_depth,
+        TRANSFER_PIXEL transfer_pixel)
+    {
+        // Iterate over the pixels of the aligned depth image
+#pragma omp parallel for schedule(dynamic)
+        for (int other_y = 0; other_y < other_intrin.height; ++other_y)
+        {
+            int other_pixel_index = other_y * other_intrin.width;
+            for (int other_x = 0; other_x < other_intrin.width; ++other_x, ++other_pixel_index)
+            {
+                float other_pixel[2] = { other_x, other_y }, other_point[3], depth_pixel[2], depth_point[3];
+                rs2_deproject_pixel_to_point(
+                    other_point,
+                    &other_intrin,
+                    other_pixel,
+                    1.0 // temp depth = 1.0
+                );
+                rs2_transform_point_to_point(depth_point, &other_to_depth, other_point);
+                rs2_project_point_to_pixel(depth_pixel, &depth_intrin, depth_point);
+
+                const int depth_x1 = static_cast<int>(depth_pixel[0] + 0.5f);
+                const int depth_y1 = static_cast<int>(depth_pixel[1] + 0.5f);
+                if( depth_x1 >= 0 && depth_x1 < depth_intrin.width && depth_y1 >= 0 && depth_y1 < depth_intrin.height )
+                {
+                    transfer_pixel(
+                        depth_y1*depth_intrin.width + depth_x1,
+                        other_pixel_index
+                    );
+                }
+            }
+        }
+    }
+
+    // Inverse Mapping with bilinear interpolation
+    template<class GET_DEPTH>
+    void align_images_bilinear(
+        const rs2_intrinsics& depth_intrin,
+        const rs2_extrinsics& other_to_depth,
+        const rs2_intrinsics& other_intrin,
+        GET_DEPTH get_depth,
+        float z_scale,
+        uint16_t * out_z)
+    {
+        // Iterate over the pixels of the aligned depth image
+#pragma omp parallel for schedule(dynamic)
+        for (int other_y = 0; other_y < other_intrin.height; ++other_y)
+        {
+            int other_pixel_index = other_y * other_intrin.width;
+            for (int other_x = 0; other_x < other_intrin.width; ++other_x, ++other_pixel_index)
+            {
+                float other_pixel[2] = { other_x, other_y }, other_point[3], depth_pixel[2], depth_point[3];
+                rs2_deproject_pixel_to_point(
+                    other_point,
+                    &other_intrin,
+                    other_pixel,
+                    1.0 // temp depth = 1.0
+                );
+                rs2_transform_point_to_point(depth_point, &other_to_depth, other_point);
+                rs2_project_point_to_pixel(depth_pixel, &depth_intrin, depth_point);
+
+                double alpha, beta;
+                int xa, xb, xc, xd, ya, yb, yc, yd;
+                if( depth_pixel[0] >= 0.0 && depth_pixel[0] < (float)depth_intrin.width && 
+                    depth_pixel[1] >= 0.0 && depth_pixel[1] < (float)depth_intrin.height)
+                {
+                    xa = floor(depth_pixel[0]); ya = floor(depth_pixel[1]);
+                    xb = ceil(depth_pixel[0]);  yb = floor(depth_pixel[1]);
+                    xc = floor(depth_pixel[0]); yc = ceil(depth_pixel[1]);
+                    xd = ceil(depth_pixel[0]);  yd = ceil(depth_pixel[1]);
+                    alpha = depth_pixel[0] - xa;
+                    beta = depth_pixel[1] - ya;
+
+                    out_z[other_pixel_index] = 
+                        (
+                            (1-alpha)*(1-beta)*get_depth(ya*depth_intrin.width+xa) +
+                            (  alpha)*(1-beta)*get_depth(yb*depth_intrin.width+xb) +
+                            (1-alpha)*(  beta)*get_depth(yc*depth_intrin.width+xc) +
+                            (  alpha)*(  beta)*get_depth(yd*depth_intrin.width+xd) 
+                        ) / z_scale;
+                }
+            }
+        }
+    }
+
+    void align_z_to_other(byte* z_aligned_to_other, const uint16_t* z_pixels, float z_scale, const rs2_intrinsics& z_intrin, const rs2_extrinsics& trans, const rs2_intrinsics& other_intrin)
     {
         auto out_z = (uint16_t *)(z_aligned_to_other);
-        align_images(z_intrin, z_to_other, other_intrin,
-            [z_pixels, z_scale](int z_pixel_index)
+
+        auto get_depth  = [z_pixels, z_scale](int z_pixel_index)
         {
             return z_scale * z_pixels[z_pixel_index];
-        },
-            [out_z, z_pixels](int z_pixel_index, int other_pixel_index)
+        };
+
+        auto transfer_pixel = [out_z, z_pixels](int z_pixel_index, int other_pixel_index)
         {
             out_z[other_pixel_index] = out_z[other_pixel_index] ?
-                std::min((int)out_z[other_pixel_index], (int)z_pixels[z_pixel_index]) :
+                // std::min((int)out_z[other_pixel_index], (int)z_pixels[z_pixel_index]) :
+                out_z[other_pixel_index]:
                 z_pixels[z_pixel_index];
-        });
+        };
+
+        int method = 1;
+        // printf("Align method(%d)\n", method);
+        switch(method){
+            case 0:
+                align_images_nearest(z_intrin, trans, other_intrin, get_depth, transfer_pixel);
+                break;
+            case 1:
+                align_images_bilinear(z_intrin, trans, other_intrin, get_depth, z_scale, out_z);
+                break;
+            default:
+                // RealSense stock alg
+                align_images(z_intrin, trans, other_intrin, get_depth, transfer_pixel);
+        }    
     }
 
     template<int N> struct bytes { char b[N]; };
@@ -266,9 +372,15 @@ namespace librealsense
 
             rs2_intrinsics other_intrinsics = other_profile->get_intrinsics();
             rs2_extrinsics depth_to_other_extrinsics{};
+            rs2_extrinsics other_to_depth_extrinsics{};
             if (!environment::get_instance().get_extrinsics_graph().try_fetch_extrinsics(*depth_profile, *other_profile, &depth_to_other_extrinsics))
             {
                 LOG_WARNING("Failed to get extrinsics from depth to " << other_profile->get_stream_type() << ", ignoring it");
+                continue;
+            }
+            if (!environment::get_instance().get_extrinsics_graph().try_fetch_extrinsics(*other_profile, *depth_profile, &other_to_depth_extrinsics))
+            {
+                LOG_WARNING("Failed to get extrinsics from other to " << depth_profile->get_stream_type() << ", ignoring it");
                 continue;
             }
 
@@ -343,7 +455,8 @@ namespace librealsense
                     reinterpret_cast<const uint16_t*>(depth_frame->get_frame_data()),
                     depth_scale,
                     depth_intrinsics,
-                    depth_to_other_extrinsics,
+                    // depth_to_other_extrinsics,
+                    other_to_depth_extrinsics,
                     other_intrinsics);
 
                 //Storing the original other frame for output frameset

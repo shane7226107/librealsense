@@ -206,7 +206,7 @@ void update_sw_sensor(rs2::software_sensor& sensor, rs2::stream_profile& profile
 
 int main(int argc, char * argv[]) try
 {
-    printf("my playground\n");
+    printf("My Playground\n");
     
     // Parameters
     int W_win = 1280;
@@ -261,16 +261,13 @@ int main(int argc, char * argv[]) try
         RS2_FORMAT_RGB8, color_video_stream_profile.get_intrinsics() }
     );
 
-    // dev.create_matcher(RS2_MATCHER_DEFAULT);
     rs2::syncer sync;
     normal_map_sensor.open(normal_map_stream);
     normal_map_sensor.start(sync);
     
     rs2::syncer sync_aligned;
     normal_map_sensor_aligned.open(normal_map_stream_aligned);    
-    normal_map_sensor_aligned.start(sync_aligned);    
-
-    // normal_map_stream_aligned.register_extrinsics_to(color_video_stream_profile, { { 1,0,0,0,1,0,0,0,1 },{ 0,0,0 } });
+    normal_map_sensor_aligned.start(sync_aligned);
 
     printf("color[%dx%d], depth[%dx%d], normal[%dx%d]\n",
         color_video_stream_profile.width(), color_video_stream_profile.height(),
@@ -280,6 +277,18 @@ int main(int argc, char * argv[]) try
 
     // Ohter init
     rs2::colorizer colorer;
+    colorer.set_option(RS2_OPTION_COLOR_SCHEME, 2.0f); // grayscale
+    /*
+    color_map->set_description(0.f, "Jet");
+    color_map->set_description(1.f, "Classic");
+    color_map->set_description(2.f, "White to Black");
+    color_map->set_description(3.f, "Black to White");
+    color_map->set_description(4.f, "Bio");
+    color_map->set_description(5.f, "Cold");
+    color_map->set_description(6.f, "Warm");
+    color_map->set_description(7.f, "Quantized");
+    color_map->set_description(8.f, "Pattern");
+    */
     rs2::align aligner(RS2_STREAM_COLOR); // Depth align to Color
 
     int frame_number = 0;
