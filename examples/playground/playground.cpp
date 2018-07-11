@@ -215,6 +215,8 @@ int main(int argc, char * argv[]) try
     int W_normal = 0;
     int H_normal = 0;
     int BPP_normal = 3;
+    int W_aligned_normal = 0;
+    int H_aligned_normal = 0;
     
     // UI init
     window app(W_win, H_win, "My playground"); // Simple window handling
@@ -232,22 +234,43 @@ int main(int argc, char * argv[]) try
     rs2::video_stream_profile depth_video_stream_profile = depth_stream_profile.as<rs2::video_stream_profile>();
     float depth_scale = get_depth_scale(profile.get_device());
   
+     // Create software-only device
+    rs2::software_device dev;
+    rs2::software_device dev_aligned;
+    auto normal_map_sensor          = dev.add_sensor("NormalMap"); // Define single sensor
+    auto normal_map_sensor_aligned  = dev_aligned.add_sensor("AlignedNormalMap");
+
+    // Use color stream profile for proper RGB channel settings, however this stream is use to display normal map
     W_normal = depth_video_stream_profile.width();
     H_normal = depth_video_stream_profile.height();
     uint8_t* p_normal_data = new uint8_t[W_normal*H_normal*BPP_normal];
-    rs2::software_device dev; // Create software-only device
-    
-    auto normal_map_sensor = dev.add_sensor("NormalMap"); // Define single sensor
-    // Use color stream profile for proper RGB channel settings, however this stream is use to display normal map
     auto normal_map_stream = normal_map_sensor.add_video_stream({
-        RS2_STREAM_COLOR, 0, 1,
+        RS2_STREAM_COLOR, 0, 0,
         W_normal, H_normal, 60,
         BPP_normal,
         RS2_FORMAT_RGB8, color_video_stream_profile.get_intrinsics() }
     );
+    // aligned normal map stream
+    W_aligned_normal = color_video_stream_profile.width();
+    H_aligned_normal = color_video_stream_profile.height();
+    uint8_t* p_aligned_normal_data = new uint8_t[W_aligned_normal*H_aligned_normal*BPP_normal];
+    auto normal_map_stream_aligned = normal_map_sensor_aligned.add_video_stream({
+        RS2_STREAM_COLOR, 0, 1,
+        W_aligned_normal, H_aligned_normal, 60,
+        BPP_normal,
+        RS2_FORMAT_RGB8, color_video_stream_profile.get_intrinsics() }
+    );
+
+    // dev.create_matcher(RS2_MATCHER_DEFAULT);
     rs2::syncer sync;
     normal_map_sensor.open(normal_map_stream);
     normal_map_sensor.start(sync);
+    
+    rs2::syncer sync_aligned;
+    normal_map_sensor_aligned.open(normal_map_stream_aligned);    
+    normal_map_sensor_aligned.start(sync_aligned);    
+
+    // normal_map_stream_aligned.register_extrinsics_to(color_video_stream_profile, { { 1,0,0,0,1,0,0,0,1 },{ 0,0,0 } });
 
     printf("color[%dx%d], depth[%dx%d], normal[%dx%d]\n",
         color_video_stream_profile.width(), color_video_stream_profile.height(),
@@ -263,6 +286,7 @@ int main(int argc, char * argv[]) try
     while (app) // Application still alive?
     {
         // printf("[%d]\n", frame_number);
+        // raw data
         rs2::frameset frameset = pipe.wait_for_frames();
         rs2::video_frame color_frame = frameset.get_color_frame();
         rs2::video_frame raw_depth_frame = frameset.get_depth_frame();
@@ -270,17 +294,31 @@ int main(int argc, char * argv[]) try
         {
             continue;
         }
-
-        make_normal_map(p_normal_data, W_normal, H_normal, BPP_normal, raw_depth_frame, depth_scale, depth_clipping_distance);
-        // manually submit sw frame to sw sensor
-        update_sw_sensor(normal_map_sensor, normal_map_stream, frame_number, p_normal_data, W_normal, H_normal, BPP_normal);
-
+        
+        // normal map from aligned data
         auto processed = aligner.process(frameset);
         rs2::depth_frame aligned_depth_frame = processed.get_depth_frame();
+        make_normal_map(
+            p_aligned_normal_data, W_aligned_normal, H_aligned_normal, BPP_normal,
+            aligned_depth_frame, depth_scale, depth_clipping_distance
+        );
+        update_sw_sensor(normal_map_sensor_aligned, normal_map_stream_aligned, frame_number, p_aligned_normal_data, W_aligned_normal, H_aligned_normal, BPP_normal);
 
-        rs2::frameset frameset_sw = sync.wait_for_frames();
-        rs2::video_frame normal_frame = frameset_sw.get_color_frame();
-        if ( !normal_frame )
+        // normal map from raw data
+        make_normal_map(
+            p_normal_data, W_normal, H_normal, BPP_normal,
+            raw_depth_frame, depth_scale, depth_clipping_distance
+        );
+        update_sw_sensor(normal_map_sensor, normal_map_stream, frame_number, p_normal_data, W_normal, H_normal, BPP_normal);
+        
+        rs2::frameset frameset_sw               = sync.wait_for_frames();
+        rs2::video_frame normal_frame           = frameset_sw.get_color_frame();
+        // printf("frameset_sw size(%d)\n", frameset_sw.size());
+        
+        rs2::frameset frameset_sw_aligned       = sync_aligned.wait_for_frames();
+        rs2::video_frame aligned_normal_frame   = frameset_sw_aligned.get_color_frame();
+        // printf("frameset_sw_aligned size(%d)\n", frameset_sw_aligned.size());
+        if ( !normal_frame || !aligned_normal_frame )
         {
             continue;
         }
@@ -288,7 +326,7 @@ int main(int argc, char * argv[]) try
         float w = static_cast<float>(app.width());
         float h = static_cast<float>(app.height());
         
-        int showCount = 4;
+        int   showCount  = 5;
         float showOffset = 0;
         auto addShow = [&](rs2::video_frame* _vFrame, const char* _str, bool _isDepth = false)
         {
@@ -307,10 +345,11 @@ int main(int argc, char * argv[]) try
             showOffset += frame_rect.w;
         };
 
-        addShow(&normal_frame, "Normal Map");
-        addShow(&raw_depth_frame, "Depth Map", true);
-        addShow(&color_frame, "RGB");
-        addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame), "Aligned Depth Map", true);
+        addShow(&normal_frame,      "Normal Map");
+        addShow(&raw_depth_frame,   "Depth Map", true);
+        addShow(&color_frame,       "RGB");
+        addShow(static_cast<rs2::video_frame*>(&aligned_normal_frame),  "Aligned Normal Map");
+        addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame),   "Aligned Depth Map", true);
 
         ++frame_number;
     }
