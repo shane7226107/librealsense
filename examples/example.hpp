@@ -105,7 +105,7 @@ public:
 
     GLuint get_gl_handle() { return gl_handle; }
     
-    void show(const rect& r, const char* text) const
+    void show(const rect& r, const char* text = nullptr) const
     {
         if (!gl_handle)
             return;
