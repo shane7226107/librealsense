@@ -27,5 +27,8 @@ namespace librealsense
             const std::shared_ptr<stream_profile_interface>& aligned_profile);
         rs2_stream _to_stream_type;
         std::map<std::pair<int, int>, int> align_stream_unique_ids;
+    private:
+        // tmp hard coded
+        uint16_t* mp_working_buf = nullptr;
     };
 }
