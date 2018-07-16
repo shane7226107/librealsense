@@ -151,7 +151,7 @@ void make_normal_map(uint8_t* p_normal_data, const int& width, const int& height
     static int range = 255;
 
     // draw normal map produced by original depthmap
-     #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
+    #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
     for (int y = 1; y < height; y++)
     {
         for (int x = 1; x < width; x++)
@@ -204,6 +204,24 @@ void update_sw_sensor(rs2::software_sensor& sensor, rs2::stream_profile& profile
     );
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//                                     These parameters are reconfigurable                                        //
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define STREAM          RS2_STREAM_COLOR  // rs2_stream is a types of data provided by RealSense device           //
+#define FORMAT          RS2_FORMAT_RGB8   // rs2_format is identifies how binary data is encoded within a frame   //
+#define WIDTH           960               // Defines the number of columns for each frame                         //
+#define HEIGHT          540               // Defines the number of lines for each frame                           //
+#define FPS             30                // Defines the rate of frames per second                                //
+#define STREAM_INDEX    0                 // Defines the stream index, used for multiple streams of the same type //
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define STREAM_D        RS2_STREAM_DEPTH  // rs2_stream is a types of data provided by RealSense device           //
+#define FORMAT_D        RS2_FORMAT_Z16    // rs2_format is identifies how binary data is encoded within a frame   //
+#define WIDTH_D         640               // Defines the number of columns for each frame                         //
+#define HEIGHT_D        480               // Defines the number of lines for each frame                           //
+#define FPS_D           30                // Defines the rate of frames per second                                //
+#define STREAM_INDEX_D  0                 // Defines the stream index, used for multiple streams of the same type //
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 int main(int argc, char * argv[]) try
 {
     printf("My Playground\n");
@@ -225,7 +243,10 @@ int main(int argc, char * argv[]) try
     
     // Device init
     rs2::pipeline pipe;
-    rs2::pipeline_profile profile = pipe.start();
+    rs2::config my_config;
+    my_config.enable_stream(STREAM, STREAM_INDEX, WIDTH, HEIGHT, FORMAT, FPS);
+    my_config.enable_stream(STREAM_D, STREAM_INDEX_D, WIDTH_D, HEIGHT_D, FORMAT_D, FPS_D);
+    rs2::pipeline_profile profile = pipe.start(my_config);
 
     rs2::stream_profile color_stream_profile = get_color_stream_profile(profile.get_streams());
     rs2::video_stream_profile color_video_stream_profile = color_stream_profile.as<rs2::video_stream_profile>();
@@ -275,7 +296,7 @@ int main(int argc, char * argv[]) try
         W_normal, H_normal
     );
 
-    // Ohter init
+    // Other init
     rs2::colorizer colorer;
     colorer.set_option(RS2_OPTION_COLOR_SCHEME, 2.0f); // grayscale
     /*
@@ -289,12 +310,19 @@ int main(int argc, char * argv[]) try
     color_map->set_description(7.f, "Quantized");
     color_map->set_description(8.f, "Pattern");
     */
+    // Disable histogram equalization
+    // colorer.set_option(RS2_OPTION_HISTOGRAM_EQUALIZATION_ENABLED, 0.0f);
+
     rs2::align aligner(RS2_STREAM_COLOR); // Depth align to Color
 
     int frame_number = 0;
     while (app) // Application still alive?
     {
-        // printf("[%d]\n", frame_number);
+        printf("frame:[%d]\n", frame_number);
+        using namespace std::chrono;
+        milliseconds timestamp = duration_cast<milliseconds>(
+            system_clock::now().time_since_epoch()
+        );
         // raw data
         rs2::frameset frameset = pipe.wait_for_frames();
         rs2::video_frame color_frame = frameset.get_color_frame();
@@ -307,17 +335,23 @@ int main(int argc, char * argv[]) try
         // normal map from aligned data
         auto processed = aligner.process(frameset);
         rs2::depth_frame aligned_depth_frame = processed.get_depth_frame();
-        make_normal_map(
-            p_aligned_normal_data, W_aligned_normal, H_aligned_normal, BPP_normal,
-            aligned_depth_frame, depth_scale, depth_clipping_distance
-        );
+        if(1)
+        {
+            make_normal_map(
+                p_aligned_normal_data, W_aligned_normal, H_aligned_normal, BPP_normal,
+                aligned_depth_frame, depth_scale, depth_clipping_distance
+            );
+        }
         update_sw_sensor(normal_map_sensor_aligned, normal_map_stream_aligned, frame_number, p_aligned_normal_data, W_aligned_normal, H_aligned_normal, BPP_normal);
 
         // normal map from raw data
-        make_normal_map(
-            p_normal_data, W_normal, H_normal, BPP_normal,
-            raw_depth_frame, depth_scale, depth_clipping_distance
-        );
+        if(1)
+        {
+            make_normal_map(
+                p_normal_data, W_normal, H_normal, BPP_normal,
+                raw_depth_frame, depth_scale, depth_clipping_distance
+            );
+        }
         update_sw_sensor(normal_map_sensor, normal_map_stream, frame_number, p_normal_data, W_normal, H_normal, BPP_normal);
         
         rs2::frameset frameset_sw               = sync.wait_for_frames();
@@ -364,6 +398,10 @@ int main(int argc, char * argv[]) try
         addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame),   1, "Aligned Depth Map", true);
         addShow(&color_frame,       1, "RGB");
 
+        printf("frame:[%d] duration[%d](ms)\n",
+            frame_number,
+            duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
+        );
         ++frame_number;
     }
 
