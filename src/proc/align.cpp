@@ -11,7 +11,7 @@
 #include "align.h"
 #include "stream.h"
 
-#define ALIGN_METHOD (3)
+#define ALIGN_METHOD (2)
 
 namespace librealsense
 {
@@ -181,8 +181,8 @@ namespace librealsense
     uint16_t get_IDW_value(const int& x, const int& y, std::vector<std::vector<float>>& kernel, const uint16_t* out_z, const int& src_width, const int& src_height)
     {
         // printf("get_IDW_value [%d][%d]\n", x, y);
-        uint16_t weighted_sum = 0;
-        uint16_t total_dist = 0;
+        float weighted_sum = 0;
+        float total_dist = 0;
 #pragma omp parallel for schedule(dynamic)
         for(size_t ky = 0 ; ky < kernel.size() ; ++ky)
         {
@@ -194,15 +194,19 @@ namespace librealsense
                 {
                     continue;
                 }
-                weighted_sum += out_z[(y + ky_offset)*src_width+(x + kx_offset)]*kernel[ky][kx];
-                total_dist += kernel[ky][kx];
+                uint16_t ref_val = out_z[(y + ky_offset)*src_width+(x + kx_offset)];
+                if( ref_val )
+                {
+                    weighted_sum += kernel[ky][kx]*(float)ref_val;
+                    total_dist += kernel[ky][kx];
+                }
             }
         }
         return ( total_dist == 0 ) ? 0 : weighted_sum/total_dist;
     }
 
     template<class GET_DEPTH, class TRANSFER_PIXEL>
-    void align_images_forward_bilinear(
+    void align_images_forward_IDW(
         const rs2_intrinsics& depth_intrin,
         const rs2_extrinsics& depth_to_other,
         const rs2_intrinsics& other_intrin,
@@ -215,6 +219,7 @@ namespace librealsense
         // Iterate over the pixels of the depth image
 #pragma omp parallel for schedule(dynamic)
         // phase 1 : forward mapping
+#if 1
         for (int depth_y = 0; depth_y < depth_intrin.height; ++depth_y)
         {
             int depth_pixel_index = depth_y * depth_intrin.width;
@@ -238,9 +243,25 @@ namespace librealsense
                     transfer_pixel(depth_pixel_index, other_y0 * other_intrin.width + other_x0);
                 }
             }
+        }   
+#else
+        for (int other_y = 0; other_y < other_intrin.height; ++other_y)
+        {
+            int other_pixel_index = other_y * other_intrin.width;
+            for (int other_x = 0; other_x < other_intrin.width; ++other_x, ++other_pixel_index)
+            {
+                if( other_y % 10 != 0 )
+                {
+                    out_z[other_pixel_index] = 0.0;
+                }
+                else
+                {
+                    out_z[other_pixel_index] = 0.5/z_scale;
+                }
+            }
         }
-#pragma omp parallel for schedule(dynamic)        
-        // phase 2 : bilinear interpolation
+#endif     
+        // phase 2 : IDW interpolation
         for (int other_y = 0; other_y < other_intrin.height; ++other_y)
         {
             int other_pixel_index = other_y * other_intrin.width;
@@ -252,7 +273,7 @@ namespace librealsense
                     p_working_buf[other_pixel_index] = get_IDW_value(
                         other_x, other_y,
                         g_kernel,
-                        out_z, depth_intrin.width, depth_intrin.height                       
+                        out_z, other_intrin.width, other_intrin.height                       
                     );
                 }
             }
@@ -308,7 +329,8 @@ namespace librealsense
                 align_images_bilinear(z_intrin, trans, other_intrin, get_depth_pixel, z_scale, out_z);
                 break;
             case 2:
-                align_images_forward_bilinear(z_intrin, trans, other_intrin, get_depth, transfer_pixel, z_scale, out_z, p_working_buf);
+                std::memset(p_working_buf, 0, other_intrin.width*other_intrin.height*sizeof(uint16_t));
+                align_images_forward_IDW(z_intrin, trans, other_intrin, get_depth, transfer_pixel, z_scale, out_z, p_working_buf);
                 break;
             default:
                 // RealSense stock alg
