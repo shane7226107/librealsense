@@ -612,8 +612,7 @@ namespace librealsense
                     reinterpret_cast<const uint16_t*>(depth_frame->get_frame_data()),
                     depth_scale,
                     depth_intrinsics,
-                    // depth_to_other_extrinsics,
-                    other_to_depth_extrinsics,
+                    depth_to_other_extrinsics,
                     other_intrinsics,
                     mp_working_buf);
 
