@@ -18,6 +18,10 @@
 #include <cstring>
 #include <chrono>
 
+// Module include
+#include "json.hpp"
+using json = nlohmann::json;
+
 class Vector3
 {
 	static constexpr double uZero = 1e-6;
@@ -204,6 +208,128 @@ void update_sw_sensor(rs2::software_sensor& sensor, rs2::stream_profile& profile
     );
 }
 
+void dump_data(rs2::video_stream_profile& color_stream, rs2::video_stream_profile& depth_stream, float depth_scale)
+{
+    rs2_intrinsics color_intrinsic = color_stream.get_intrinsics();
+    rs2_intrinsics depth_intrinsic = depth_stream.get_intrinsics();;
+    rs2_extrinsics depth_to_color  = depth_stream.get_extrinsics_to(color_stream);
+
+    printf("=== camera profiles ===\n");
+    printf("color intrin: wh[%dx%d] ppx[%f,%f] f[%f,%f] model[%d] coef[%f,%f,%f,%f,%f]\n",
+        color_intrinsic.width, color_intrinsic.height,
+        color_intrinsic.ppx, color_intrinsic.ppy,
+        color_intrinsic.fx, color_intrinsic.fy,
+        color_intrinsic.model,
+        color_intrinsic.coeffs[0],color_intrinsic.coeffs[1],color_intrinsic.coeffs[2],color_intrinsic.coeffs[3],color_intrinsic.coeffs[4]
+    );
+    printf("depth intrin: wh[%dx%d] ppx[%f,%f] f[%f,%f] model[%d] coef[%f,%f,%f,%f,%f]\n",
+        depth_intrinsic.width, depth_intrinsic.height,
+        depth_intrinsic.ppx, depth_intrinsic.ppy,
+        depth_intrinsic.fx, depth_intrinsic.fy,
+        depth_intrinsic.model,
+        depth_intrinsic.coeffs[0],depth_intrinsic.coeffs[1],depth_intrinsic.coeffs[2],depth_intrinsic.coeffs[3],depth_intrinsic.coeffs[4]
+    );
+
+    printf("depth scale=[%f]\n", depth_scale);
+    for(int i=0 ; i<9 ; ++i){
+        printf("depth to color: rot[%d]=[%f]\n", i, depth_to_color.rotation[i]);
+    }
+    for(int i=0 ; i<3 ; ++i){
+        printf("depth to color: trans[%d]=[%f]\n", i, depth_to_color.translation[i]);
+    }
+
+
+    json camera_profile;
+
+    auto make_json_intrin = [&camera_profile](rs2_intrinsics& intinc, const char* camera_name)
+    {
+        camera_profile[camera_name]["width"] = intinc.width;
+        camera_profile[camera_name]["height"] = intinc.height;
+        camera_profile[camera_name]["ppx"] = intinc.ppx;
+        camera_profile[camera_name]["ppy"] = intinc.ppy;
+        camera_profile[camera_name]["fy"] = intinc.fy;
+        camera_profile[camera_name]["fy"] = intinc.fy;
+        camera_profile[camera_name]["distortion"] = intinc.model;
+        camera_profile[camera_name]["coeff"] = intinc.coeffs;
+    };
+
+    make_json_intrin(color_intrinsic, "color");
+    make_json_intrin(depth_intrinsic, "depth");
+
+    auto make_json_extrin = [&camera_profile](rs2_extrinsics& extrinc, const char* camera_name)
+    {
+        camera_profile[camera_name]["rotation"] = extrinc.rotation;
+        camera_profile[camera_name]["translation"] = extrinc.translation;
+    };
+
+    make_json_extrin(depth_to_color, "depth_to_color");
+
+    char filename[128];
+    snprintf(filename, sizeof(filename), "camera_profile.json");
+    std::ofstream o(filename);
+    o << std::setw(4) << camera_profile << std::endl;
+    o.close();
+
+    std::ifstream i(filename);
+    json camera_profile_read;
+    i >> camera_profile_read;
+    i.close();
+
+    // printf("input_intrinsic wh[%dx%d] ppx[%f,%f] coeff[%f,%f,%f] rot[%f,%f,%f] trans[%f,%f,%f]\n",
+    //     (int)camera_profile_read["color"]["width"], (int)camera_profile_read["color"]["height"],
+    //     (float)camera_profile_read["color"]["ppx"], (float)camera_profile_read["color"]["ppy"],
+    //     (float)camera_profile_read["color"]["coeff"][0], (float)camera_profile_read["color"]["coeff"][1], (float)camera_profile_read["color"]["coeff"][2],
+    //     (float)camera_profile_read["depth_to_color"]["rotation"][0],(float)camera_profile_read["depth_to_color"]["rotation"][1],(float)camera_profile_read["depth_to_color"]["rotation"][2],
+    //     (float)camera_profile_read["depth_to_color"]["translation"][0],(float)camera_profile_read["depth_to_color"]["translation"][1],(float)camera_profile_read["depth_to_color"]["translation"][2]
+    // ); 
+}
+
+void dump_depth_map(const rs2::depth_frame& depth_frame, const char* ext_name)
+{
+    printf("dump depthmap +\n");
+
+    const uint16_t* p_depth_frame = reinterpret_cast<const uint16_t*>(depth_frame.get_data());
+
+    int width = depth_frame.get_width();
+    int height = depth_frame.get_height();
+
+    char filename[128];
+    using namespace std::chrono;
+    milliseconds timestamp = duration_cast<milliseconds>(
+        system_clock::now().time_since_epoch()
+    );
+    snprintf(filename, sizeof(filename), "depthmap_%s_%d_%d_%d_%d.dat", ext_name, width, height, sizeof(uint16_t), timestamp.count());
+    printf("%s\n", filename);
+
+    std::ofstream out(filename, std::ios::out | std::ios::binary);
+
+    if( !out )
+    {
+        printf("[E] Cannot open file!\n");
+        return;
+    }
+
+    out.write((char*)p_depth_frame, width*height*sizeof(uint16_t));
+    out.close();
+
+    // check
+    uint16_t* depth_read = new uint16_t[width*height];
+    std::ifstream in(filename, std::ios::in | std::ios::binary);
+    in.read((char*)depth_read, width*height*sizeof(uint16_t));
+    for(int i=0 ; i<width*height ; ++i)
+    {
+        if( depth_read[i] != p_depth_frame[i] )
+        {
+            printf("[E] check file failed!\n");
+        }
+    }
+    printf("check file passed\n");
+
+    delete[] depth_read;
+
+    printf("dump depthmap -\n");
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //                                     These parameters are reconfigurable                                        //
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -254,6 +380,8 @@ int main(int argc, char * argv[]) try
     rs2::stream_profile depth_stream_profile = get_depth_stream_profile(profile.get_streams());
     rs2::video_stream_profile depth_video_stream_profile = depth_stream_profile.as<rs2::video_stream_profile>();
     float depth_scale = get_depth_scale(profile.get_device());
+
+    dump_data(color_video_stream_profile, depth_video_stream_profile, depth_scale);
   
      // Create software-only device
     rs2::software_device dev;
@@ -318,7 +446,7 @@ int main(int argc, char * argv[]) try
     int frame_number = 0;
     while (app) // Application still alive?
     {
-        printf("frame:[%d]\n", frame_number);
+        // printf("frame:[%d]\n", frame_number);
         using namespace std::chrono;
         milliseconds timestamp = duration_cast<milliseconds>(
             system_clock::now().time_since_epoch()
@@ -398,10 +526,17 @@ int main(int argc, char * argv[]) try
         addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame),   1, "Aligned Depth Map", true);
         addShow(&color_frame,       1, "RGB");
 
-        printf("frame:[%d] duration[%d](ms)\n",
-            frame_number,
-            duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
-        );
+        // printf("frame:[%d] duration[%d](ms)\n",
+        //     frame_number,
+        //     duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
+        // );
+
+        // if( frame_number == 10 ){
+        //     dump_depth_map(raw_depth_frame, "raw");
+        //     dump_depth_map(aligned_depth_frame, "aligned");
+        //     break;
+        // }
+
         ++frame_number;
     }
 
