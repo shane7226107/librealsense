@@ -19,7 +19,7 @@ endif()
 if(BUILD_GRAPHICAL_EXAMPLES)
     add_executable(playground playground.cpp ../../third-party/imgui/imgui.cpp ../../third-party/imgui/imgui_draw.cpp ../../third-party/imgui/imgui_impl_glfw.cpp)
     target_link_libraries(playground ${DEPENDENCIES})
-    include_directories(playground ../../common ../../third-party/imgui)
+    include_directories(playground ../../common ../../third-party ../../common ../../third-party/imgui)
     set_target_properties (playground PROPERTIES
         FOLDER Examples
     )

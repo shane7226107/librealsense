@@ -9,6 +9,8 @@
 #include "../example.hpp"
 #include <imgui.h>
 #include "imgui_impl_glfw.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 // Standard
 #include <sstream>
@@ -17,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <chrono>
+#include <future>
 
 // Module include
 #include "json.hpp"
@@ -332,13 +335,100 @@ void dump_depth_map(const rs2::depth_frame& depth_frame, const char* ext_name)
     printf("dump depthmap -\n");
 }
 
+// uint8_t* tmp_buffer_depth = new uint8_t[1920*1080*10];
+// uint8_t* tmp_buffer_color = new uint8_t[1920*1080*10];
+
+std::vector<uint8_t*> tmp_buffer_depth;
+std::vector<uint8_t*> tmp_buffer_color;
+
+std::string dump_buffer_to_memory(
+    const rs2::video_frame& frame,
+    const char* type,
+    const char* extension,
+    const std::chrono::milliseconds& timestamp,
+    const int& index,
+    const int& width,
+    const int& height
+){
+    const uint16_t* p_frame = reinterpret_cast<const uint16_t*>(frame.get_data());
+    const uint8_t* p_frame_byte = reinterpret_cast<const uint8_t*>(frame.get_data());
+
+    char filename[128];
+    snprintf(filename, sizeof(filename), "dump/%d_%s_%dx%d_ts[%lld].%s", 
+        index, type, width, height, timestamp.count(), extension
+    );    
+    printf("%s\n", filename);
+    std::string ret(filename);
+
+    if( strcmp(extension,"png") == 0 ){
+        // PNG
+        rs2::colorizer colorer;
+        rs2::video_frame vf = colorer(frame);
+        // stbi_write_png(
+        //     filename,
+        //     vf.get_width(), vf.get_height(),
+        //     vf.get_bytes_per_pixel(), vf.get_data(), vf.get_stride_in_bytes()
+        // );
+        std::memcpy(tmp_buffer_color[index], p_frame_byte, width*height*vf.get_bytes_per_pixel());
+    }else{
+        // uint16
+        // std::ofstream out(filename, std::ios::out | std::ios::binary);
+        // if( !out ){
+        //     printf("[E] Cannot open file!\n");
+        //     return ret;
+        // }
+        // out.write((char*)p_frame, width*height*sizeof(uint16_t));
+        // out.close();
+        std::memcpy(tmp_buffer_depth[index], p_frame_byte, width*height*sizeof(uint16_t));
+    }
+    return ret;
+}
+
+std::string dump_from_memory(
+    const char* type,
+    const char* extension,
+    const uint64_t& timestamp,
+    const int& index,
+    const int& width,
+    const int& height,
+    const int& bpp
+){
+    char filename[128];
+    snprintf(filename, sizeof(filename), "dump/%d_%s_%dx%d_ts[%lld].%s", 
+        index, type, width, height, timestamp, extension
+    );    
+    printf("%s\n", filename);
+    std::string ret(filename);
+
+    if( strcmp(extension,"png") == 0 ){
+        // PNG
+        void* p_frame = static_cast<void*>(tmp_buffer_color[index]);
+        stbi_write_png(
+            filename,
+            width, height,
+            bpp, p_frame, width*bpp
+        );
+    }else{
+        // uint16
+        uint8_t* p_frame = tmp_buffer_depth[index];
+        std::ofstream out(filename, std::ios::out | std::ios::binary);
+        if( !out ){
+            printf("[E] Cannot open file!\n");
+            return ret;
+        }
+        out.write((char*)p_frame, width*height*bpp);
+        out.close();
+    }
+    return ret;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //                                     These parameters are reconfigurable                                        //
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #define STREAM          RS2_STREAM_COLOR  // rs2_stream is a types of data provided by RealSense device           //
 #define FORMAT          RS2_FORMAT_RGB8   // rs2_format is identifies how binary data is encoded within a frame   //
-#define WIDTH           1920              // Defines the number of columns for each frame                         //
-#define HEIGHT          1080              // Defines the number of lines for each frame                           //
+#define WIDTH           640              // Defines the number of columns for each frame                         //
+#define HEIGHT          360              // Defines the number of lines for each frame                           //
 #define FPS             30                // Defines the rate of frames per second                                //
 #define STREAM_INDEX    0                 // Defines the stream index, used for multiple streams of the same type //
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -350,11 +440,165 @@ void dump_depth_map(const rs2::depth_frame& depth_frame, const char* ext_name)
 #define STREAM_INDEX_D  0                 // Defines the stream index, used for multiple streams of the same type //
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-int main(int argc, char * argv[]) try
+int dump_sequence_data(const int& frame_dump_start, const int& frame_dump_end)
 {
-    printf("My Playground\n");
-    
+    printf("dump_sequence_data\n");
     // Parameters
+    int W_win = 1280;
+    int H_win = 720;
+
+    // UI init
+    window app(W_win, H_win, "Dump Sequence Data"); // Simple window handling
+    ImGui_ImplGlfw_Init(app, false);           // ImGui library intializition
+    texture renderer;                          // Helper for renderig images   
+
+    // Device init
+    rs2::pipeline pipe;
+    rs2::config my_config;
+    my_config.enable_stream(STREAM, STREAM_INDEX, WIDTH, HEIGHT, FORMAT, FPS);
+    my_config.enable_stream(STREAM_D, STREAM_INDEX_D, WIDTH_D, HEIGHT_D, FORMAT_D, FPS_D);
+    rs2::pipeline_profile profile = pipe.start(my_config);
+
+    rs2::stream_profile color_stream_profile = get_color_stream_profile(profile.get_streams());
+    rs2::video_stream_profile color_video_stream_profile = color_stream_profile.as<rs2::video_stream_profile>();
+    
+    rs2::stream_profile depth_stream_profile = get_depth_stream_profile(profile.get_streams());
+    rs2::video_stream_profile depth_video_stream_profile = depth_stream_profile.as<rs2::video_stream_profile>();
+    float depth_scale = get_depth_scale(profile.get_device());
+    dump_data(color_video_stream_profile, depth_video_stream_profile, depth_scale);
+
+    // Other init
+    rs2::colorizer colorer;
+    colorer.set_option(RS2_OPTION_COLOR_SCHEME, 2.0f); // grayscale
+    rs2::align aligner(RS2_STREAM_COLOR); // Depth align to Color
+
+    int frame_number = 0;
+    json dump_list;
+    int dump_count = frame_dump_end-frame_dump_start;
+    dump_list["dump_count"] = dump_count;
+    for(int i=0 ; i< dump_count ; ++i){
+        tmp_buffer_color.push_back(new uint8_t[WIDTH*HEIGHT*3]);     // BPP == 3
+        tmp_buffer_depth.push_back(new uint8_t[WIDTH_D*HEIGHT_D*2]); // BPP == 2
+    }
+
+    while (app) // Application still alive?
+    {
+        // printf("frame:[%d]\n", frame_number);
+        using namespace std::chrono;
+        milliseconds timestamp = duration_cast<milliseconds>(
+            system_clock::now().time_since_epoch()
+        );
+        // raw data
+        rs2::frameset frameset = pipe.wait_for_frames();
+        rs2::video_frame color_frame = frameset.get_color_frame();
+        rs2::video_frame raw_depth_frame = frameset.get_depth_frame();
+        if( !color_frame || !raw_depth_frame ){
+            continue;
+        }
+
+        float w = static_cast<float>(app.width());
+        float h = static_cast<float>(app.height());
+        
+        int   rowCount  = 1;
+        int   colCount  = 2;
+        float showOffset[1] = {0.0};
+        auto addShow = [&](rs2::video_frame* _vFrame, int row, const char* _str, bool _isDepth = false)
+        {
+            rect frame_rect{showOffset[row], (h/rowCount)*row, w/colCount, h/rowCount};
+            // printf("showOffset[%.2f] showframe_rect[%.2f,%.2f,%.2fx%.2f]\n", showOffset, frame_rect.x, frame_rect.y, frame_rect.w, frame_rect.h);            
+            frame_rect = frame_rect.adjust_ratio({ static_cast<float>(_vFrame->get_width()),static_cast<float>(_vFrame->get_height()) });
+            if(_isDepth)
+            {
+                renderer.upload(colorer(*_vFrame));
+            }
+            else
+            {
+                renderer.upload(*_vFrame);
+            }
+            renderer.show(frame_rect, _str);
+            showOffset[row] += frame_rect.w;
+        };
+
+        // row 0
+        addShow(&color_frame,      0, "Color");
+        addShow(&raw_depth_frame,   0, "Depth Map", true);
+
+        if( frame_number >= frame_dump_start && frame_number < frame_dump_end ){
+            int dump_index = frame_number-frame_dump_start;
+            //std::string filename_depth = dump_buffer(raw_depth_frame, "depth", "dat", timestamp, frame_number, raw_depth_frame.get_width(), raw_depth_frame.get_height());            
+            std::future<std::string> task_dump_depth = std::async(
+                std::launch::async, 
+                [&]{
+                    dump_list["depth"][dump_index]["type"] = "depth";
+                    dump_list["depth"][dump_index]["extension"] = "dat";
+                    dump_list["depth"][dump_index]["timestamp"] = (uint64_t)timestamp.count();
+                    dump_list["depth"][dump_index]["index"] = (uint64_t)dump_index;
+                    dump_list["depth"][dump_index]["width"] = raw_depth_frame.get_width();
+                    dump_list["depth"][dump_index]["height"] = raw_depth_frame.get_height();
+                    dump_list["depth"][dump_index]["bpp"] = raw_depth_frame.get_bytes_per_pixel();
+                    return dump_buffer_to_memory(raw_depth_frame, "depth", "dat", timestamp, dump_index, raw_depth_frame.get_width(), raw_depth_frame.get_height());
+                }
+            );
+
+            dump_list["color"][dump_index]["type"] = "color";
+            dump_list["color"][dump_index]["extension"] = "png";
+            dump_list["color"][dump_index]["timestamp"] = (uint64_t)timestamp.count();
+            dump_list["color"][dump_index]["index"] = (uint64_t)dump_index;
+            dump_list["color"][dump_index]["width"] = color_frame.get_width();
+            dump_list["color"][dump_index]["height"] = color_frame.get_height();
+            dump_list["color"][dump_index]["bpp"] = color_frame.get_bytes_per_pixel();
+            std::string filename_color = dump_buffer_to_memory(color_frame, "color", "png", timestamp, dump_index, color_frame.get_width(), color_frame.get_height());
+
+            dump_list["color"][dump_index]["filename"] = filename_color;
+            dump_list["depth"][dump_index]["filename"] = task_dump_depth.get();
+        }
+
+        ++frame_number;
+    }
+
+    // dump from memory
+    {
+        printf("dump from memory +\n");
+        for(int i=0 ; i<dump_count ; ++i){
+            dump_from_memory(
+                "color",
+                "png",
+                dump_list["color"][i]["timestamp"],
+                dump_list["color"][i]["index"],
+                dump_list["color"][i]["width"],
+                dump_list["color"][i]["height"],
+                dump_list["color"][i]["bpp"]
+            );
+            dump_from_memory(
+                "depth",
+                "dat",
+                dump_list["depth"][i]["timestamp"],
+                dump_list["depth"][i]["index"],
+                dump_list["depth"][i]["width"],
+                dump_list["depth"][i]["height"],
+                dump_list["depth"][i]["bpp"]
+            );
+        }
+        printf("dump from memory -\n");
+    }
+
+    char filename[128];
+    snprintf(filename, sizeof(filename), "dump/dump_list.json");
+    std::ofstream o(filename);
+    o << std::setw(4) << dump_list << std::endl;
+    o.close();
+
+    // release working buffer
+    for(int i=0 ; i<dump_count ; ++i){
+        delete[] tmp_buffer_color[i];
+        delete[] tmp_buffer_depth[i];
+    }
+    return EXIT_SUCCESS;
+}
+
+int show_everything()
+{
+        // Parameters
     int W_win = 1280;
     int H_win = 720;
     float depth_clipping_distance = 1.0f;
@@ -543,8 +787,18 @@ int main(int argc, char * argv[]) try
     }
 
     delete[] p_normal_data;
-    system("pause");
     return EXIT_SUCCESS;
+}
+
+int main(int argc, char * argv[]) try
+{
+    printf("My Playground\n");
+
+    // int ret = show_everything();
+    int ret = dump_sequence_data(60, 360);
+
+    system("pause");
+    return ret;
 }
 catch (const rs2::error & e)
 {
