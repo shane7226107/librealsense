@@ -247,7 +247,7 @@ void dump_data(rs2::video_stream_profile& color_stream, rs2::video_stream_profil
         camera_profile[camera_name]["height"] = intinc.height;
         camera_profile[camera_name]["ppx"] = intinc.ppx;
         camera_profile[camera_name]["ppy"] = intinc.ppy;
-        camera_profile[camera_name]["fy"] = intinc.fy;
+        camera_profile[camera_name]["fx"] = intinc.fx;
         camera_profile[camera_name]["fy"] = intinc.fy;
         camera_profile[camera_name]["distortion"] = intinc.model;
         camera_profile[camera_name]["coeff"] = intinc.coeffs;
@@ -263,6 +263,8 @@ void dump_data(rs2::video_stream_profile& color_stream, rs2::video_stream_profil
     };
 
     make_json_extrin(depth_to_color, "depth_to_color");
+
+    camera_profile["depth_scale"] = depth_scale;
 
     char filename[128];
     snprintf(filename, sizeof(filename), "camera_profile.json");
@@ -335,8 +337,8 @@ void dump_depth_map(const rs2::depth_frame& depth_frame, const char* ext_name)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #define STREAM          RS2_STREAM_COLOR  // rs2_stream is a types of data provided by RealSense device           //
 #define FORMAT          RS2_FORMAT_RGB8   // rs2_format is identifies how binary data is encoded within a frame   //
-#define WIDTH           960               // Defines the number of columns for each frame                         //
-#define HEIGHT          540               // Defines the number of lines for each frame                           //
+#define WIDTH           1920              // Defines the number of columns for each frame                         //
+#define HEIGHT          1080              // Defines the number of lines for each frame                           //
 #define FPS             30                // Defines the rate of frames per second                                //
 #define STREAM_INDEX    0                 // Defines the stream index, used for multiple streams of the same type //
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -526,10 +528,10 @@ int main(int argc, char * argv[]) try
         addShow(static_cast<rs2::video_frame*>(&aligned_depth_frame),   1, "Aligned Depth Map", true);
         addShow(&color_frame,       1, "RGB");
 
-        // printf("frame:[%d] duration[%d](ms)\n",
-        //     frame_number,
-        //     duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
-        // );
+        printf("frame:[%d] duration[%d](ms)\n",
+            frame_number,
+            duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
+        );
 
         // if( frame_number == 10 ){
         //     dump_depth_map(raw_depth_frame, "raw");

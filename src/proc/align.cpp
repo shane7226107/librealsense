@@ -279,17 +279,17 @@ namespace librealsense
             }
         }
 
-        for (int other_y = 0; other_y < other_intrin.height; ++other_y)
-        {
-            int other_pixel_index = other_y * other_intrin.width;
-            for (int other_x = 0; other_x < other_intrin.width; ++other_x, ++other_pixel_index)
-            {
-                if( !out_z[other_pixel_index] )
-                {
-                    out_z[other_pixel_index] = p_working_buf[other_pixel_index];
-                }
-            }
-        }
+        // for (int other_y = 0; other_y < other_intrin.height; ++other_y)
+        // {
+        //     int other_pixel_index = other_y * other_intrin.width;
+        //     for (int other_x = 0; other_x < other_intrin.width; ++other_x, ++other_pixel_index)
+        //     {
+        //         if( !out_z[other_pixel_index] )
+        //         {
+        //             out_z[other_pixel_index] = p_working_buf[other_pixel_index];
+        //         }
+        //     }
+        // }
     }
 
     void align_z_to_other(
