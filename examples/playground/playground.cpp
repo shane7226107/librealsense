@@ -93,6 +93,60 @@ public:
 	};
 };
 
+/**
+Class to encapsulate a filter alongside its options
+*/
+class filter_options
+{
+public:
+    filter_options(const std::string name, rs2::process_interface& filter);
+    filter_options(filter_options&& other);
+    std::string filter_name;                                   // Friendly name of the filter
+    rs2::process_interface& filter;                            // The filter in use
+    // std::map<rs2_option, filter_slider_ui> supported_options;  // maps from an option supported by the filter, to the corresponding slider
+    std::atomic_bool is_enabled;                               // A boolean controlled by the user that determines whether to apply the filter or not
+};
+
+/**
+Constructor for filter_options, takes a name and a filter.
+*/
+filter_options::filter_options(const std::string name, rs2::process_interface& filter) :
+    filter_name(name),
+    filter(filter),
+    is_enabled(true)
+{
+    const std::array<rs2_option, 3> possible_filter_options = {
+        RS2_OPTION_FILTER_MAGNITUDE,
+        RS2_OPTION_FILTER_SMOOTH_ALPHA,
+        RS2_OPTION_FILTER_SMOOTH_DELTA
+    };
+
+    //Go over each filter option and create a slider for it
+    for (rs2_option opt : possible_filter_options)
+    {
+        if (filter.supports(opt))
+        {
+            rs2::option_range range = filter.get_option_range(opt);
+            // supported_options[opt].range = range;
+            // supported_options[opt].value = range.def;
+            // supported_options[opt].is_int = filter_slider_ui::is_all_integers(range);
+            // supported_options[opt].description = filter.get_option_description(opt);
+            std::string opt_name = rs2_option_to_string(opt);
+            // supported_options[opt].name = name + "_" + opt_name;
+            std::string prefix = "Filter ";
+            // supported_options[opt].label = name + " " + opt_name.substr(prefix.length());
+        }
+    }
+}
+
+filter_options::filter_options(filter_options&& other) :
+    filter_name(std::move(other.filter_name)),
+    filter(other.filter),
+    // supported_options(std::move(other.supported_options)),
+    is_enabled(other.is_enabled.load())
+{
+}
+
 float get_depth_scale(rs2::device dev)
 {
     // Go over the device's sensors
@@ -427,8 +481,8 @@ std::string dump_from_memory(
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #define STREAM          RS2_STREAM_COLOR  // rs2_stream is a types of data provided by RealSense device           //
 #define FORMAT          RS2_FORMAT_RGB8   // rs2_format is identifies how binary data is encoded within a frame   //
-#define WIDTH           640              // Defines the number of columns for each frame                         //
-#define HEIGHT          360              // Defines the number of lines for each frame                           //
+#define WIDTH           1920              // Defines the number of columns for each frame                         //
+#define HEIGHT          1080              // Defines the number of lines for each frame                           //
 #define FPS             30                // Defines the rate of frames per second                                //
 #define STREAM_INDEX    0                 // Defines the stream index, used for multiple streams of the same type //
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -596,9 +650,143 @@ int dump_sequence_data(const int& frame_dump_start, const int& frame_dump_end)
     return EXIT_SUCCESS;
 }
 
+int filter_test()
+{
+    // Parameters
+    int W_win = 1280;
+    int H_win = 720;
+    float depth_clipping_distance = 1.0f;
+    int BPP_Depth = 2;
+
+
+    // UI init
+    window app(W_win, H_win, "My playground"); // Simple window handling
+    ImGui_ImplGlfw_Init(app, false);           // ImGui library intializition
+    texture renderer;                          // Helper for renderig images
+
+    // Device init
+    rs2::pipeline pipe;
+    rs2::config my_config;
+    my_config.enable_stream(STREAM, STREAM_INDEX, WIDTH, HEIGHT, FORMAT, FPS);
+    my_config.enable_stream(STREAM_D, STREAM_INDEX_D, WIDTH_D, HEIGHT_D, FORMAT_D, FPS_D);
+    rs2::pipeline_profile profile = pipe.start(my_config);
+
+    rs2::stream_profile color_stream_profile = get_color_stream_profile(profile.get_streams());
+    rs2::video_stream_profile color_video_stream_profile = color_stream_profile.as<rs2::video_stream_profile>();
+    
+    rs2::stream_profile depth_stream_profile = get_depth_stream_profile(profile.get_streams());
+    rs2::video_stream_profile depth_video_stream_profile = depth_stream_profile.as<rs2::video_stream_profile>();
+    float depth_scale = get_depth_scale(profile.get_device());
+
+    // Create software-only device
+    rs2::software_device dev;
+    auto filtered_depth_sensor          = dev.add_sensor("FilteredDepth"); // Define single sensor
+    uint8_t* p_filtered_depth = new uint8_t[WIDTH_D*HEIGHT_D*BPP_Depth];
+    auto filtered_depth_stream = filtered_depth_sensor.add_video_stream({
+        RS2_STREAM_DEPTH, 0, 0,
+        WIDTH_D, HEIGHT_D, 60,
+        BPP_Depth,
+        RS2_FORMAT_DISPARITY16, depth_video_stream_profile.get_intrinsics() }
+    );
+
+    rs2::syncer sync;
+    filtered_depth_sensor.open(filtered_depth_stream);
+    filtered_depth_sensor.start(sync);
+
+    // Other init
+    rs2::colorizer colorer;
+    colorer.set_option(RS2_OPTION_COLOR_SCHEME, 2.0f); // grayscale
+    colorer.set_option(RS2_OPTION_HISTOGRAM_EQUALIZATION_ENABLED, 0.0f);
+
+    // Filters
+    rs2::spatial_filter spat_filter;    // Spatial    - edge-preserving spatial smoothing
+    rs2::temporal_filter temp_filter;   // Temporal   - reduces temporal noise
+    // Initialize a vector that holds filters and their options
+    std::vector<filter_options> filters;
+    filters.emplace_back("Spatial", spat_filter);
+    filters.emplace_back("Temporal", temp_filter);
+
+    int frame_number = 0;
+    while (app) // Application still alive?
+    {
+        // printf("frame:[%d]\n", frame_number);
+        using namespace std::chrono;
+        milliseconds timestamp = duration_cast<milliseconds>(
+            system_clock::now().time_since_epoch()
+        );
+        // raw data
+        rs2::frameset frameset = pipe.wait_for_frames();
+        rs2::video_frame color_frame = frameset.get_color_frame();
+        rs2::video_frame raw_depth_frame = frameset.get_depth_frame();
+        if ( !color_frame || !raw_depth_frame )
+        {
+            continue;
+        }
+
+        const uint8_t* p_raw_depth_frame = static_cast<const uint8_t*>(raw_depth_frame.get_data());
+        update_sw_sensor(filtered_depth_sensor, depth_stream_profile, frame_number, p_raw_depth_frame, 
+            WIDTH_D, HEIGHT_D, BPP_Depth
+        );
+
+        rs2::frameset frameset_sw            = sync.wait_for_frames();
+        rs2::video_frame clone_depth_frame   = frameset_sw.get_depth_frame();
+        // printf("frameset_sw size(%d)\n", frameset_sw.size());
+        
+        // printf("frameset_sw_aligned size(%d)\n", frameset_sw_aligned.size());
+        if( !clone_depth_frame )
+        {
+            continue;
+        }
+        // filers
+        for (auto&& filter : filters){
+            clone_depth_frame = filter.filter.process(clone_depth_frame);
+        }
+        
+        // render
+        float w = static_cast<float>(app.width());
+        float h = static_cast<float>(app.height());
+
+        int   rowCount  = 2;
+        int   colCount  = 2;
+        float showOffset[2] = {0.0, 0.0};
+        auto addShow = [&](rs2::video_frame* _vFrame, int row, const char* _str, bool _isDepth = false)
+        {
+            rect frame_rect{showOffset[row], (h/rowCount)*row, w/colCount, h/rowCount};
+            // printf("showOffset[%.2f] showframe_rect[%.2f,%.2f,%.2fx%.2f]\n", showOffset, frame_rect.x, frame_rect.y, frame_rect.w, frame_rect.h);            
+            frame_rect = frame_rect.adjust_ratio({ static_cast<float>(_vFrame->get_width()),static_cast<float>(_vFrame->get_height()) });
+            if(_isDepth)
+            {
+                renderer.upload(colorer(*_vFrame));
+            }
+            else
+            {
+                renderer.upload(*_vFrame);
+            }
+            renderer.show(frame_rect, _str);
+            showOffset[row] += frame_rect.w;
+        };
+
+        // row 0
+        addShow(&color_frame,       0, "RGB");
+        
+        // row 1
+        addShow(&raw_depth_frame,     1, "Depth Map", true);
+        addShow(&clone_depth_frame,   1, "Depth Map Filtered", true);
+
+        printf("frame:[%d] duration[%d](ms)\n",
+            frame_number,
+            duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
+        );
+
+        ++frame_number;
+    }
+
+    return EXIT_SUCCESS;
+}
+
 int show_everything()
 {
-        // Parameters
+    // Parameters
     int W_win = 1280;
     int H_win = 720;
     float depth_clipping_distance = 1.0f;
@@ -629,7 +817,7 @@ int show_everything()
 
     dump_data(color_video_stream_profile, depth_video_stream_profile, depth_scale);
   
-     // Create software-only device
+    // Create software-only device
     rs2::software_device dev;
     rs2::software_device dev_aligned;
     auto normal_map_sensor          = dev.add_sensor("NormalMap"); // Define single sensor
@@ -795,8 +983,9 @@ int main(int argc, char * argv[]) try
     printf("My Playground\n");
 
     // int ret = show_everything();
-    int ret = dump_sequence_data(60, 360);
-
+    // int ret = dump_sequence_data(120, 130);
+    int ret = filter_test();
+    
     system("pause");
     return ret;
 }
