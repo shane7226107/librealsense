@@ -20,6 +20,7 @@
 #include <cstring>
 #include <chrono>
 #include <future>
+#include <string>
 
 // Module include
 #include "json.hpp"
@@ -94,6 +95,22 @@ public:
 };
 
 /**
+Helper class for controlling the filter's GUI element
+*/
+struct filter_slider_ui
+{
+    std::string name;
+    std::string label;
+    std::string description;
+    bool is_int;
+    float value;
+    rs2::option_range range;
+
+    // bool render(const float3& location, bool enabled);
+    static bool is_all_integers(const rs2::option_range& range);
+};
+
+/**
 Class to encapsulate a filter alongside its options
 */
 class filter_options
@@ -103,7 +120,7 @@ public:
     filter_options(filter_options&& other);
     std::string filter_name;                                   // Friendly name of the filter
     rs2::process_interface& filter;                            // The filter in use
-    // std::map<rs2_option, filter_slider_ui> supported_options;  // maps from an option supported by the filter, to the corresponding slider
+    std::map<rs2_option, filter_slider_ui> supported_options;  // maps from an option supported by the filter, to the corresponding slider
     std::atomic_bool is_enabled;                               // A boolean controlled by the user that determines whether to apply the filter or not
 };
 
@@ -127,14 +144,14 @@ filter_options::filter_options(const std::string name, rs2::process_interface& f
         if (filter.supports(opt))
         {
             rs2::option_range range = filter.get_option_range(opt);
-            // supported_options[opt].range = range;
-            // supported_options[opt].value = range.def;
-            // supported_options[opt].is_int = filter_slider_ui::is_all_integers(range);
-            // supported_options[opt].description = filter.get_option_description(opt);
+            supported_options[opt].range = range;
+            supported_options[opt].value = range.def; // default value
+            supported_options[opt].is_int = filter_slider_ui::is_all_integers(range);
+            supported_options[opt].description = filter.get_option_description(opt);
             std::string opt_name = rs2_option_to_string(opt);
-            // supported_options[opt].name = name + "_" + opt_name;
+            supported_options[opt].name = name + "_" + opt_name;
             std::string prefix = "Filter ";
-            // supported_options[opt].label = name + " " + opt_name.substr(prefix.length());
+            supported_options[opt].label = name + " " + opt_name.substr(prefix.length());
         }
     }
 }
@@ -142,7 +159,7 @@ filter_options::filter_options(const std::string name, rs2::process_interface& f
 filter_options::filter_options(filter_options&& other) :
     filter_name(std::move(other.filter_name)),
     filter(other.filter),
-    // supported_options(std::move(other.supported_options)),
+    supported_options(std::move(other.supported_options)),
     is_enabled(other.is_enabled.load())
 {
 }
@@ -388,9 +405,6 @@ void dump_depth_map(const rs2::depth_frame& depth_frame, const char* ext_name)
 
     printf("dump depthmap -\n");
 }
-
-// uint8_t* tmp_buffer_depth = new uint8_t[1920*1080*10];
-// uint8_t* tmp_buffer_color = new uint8_t[1920*1080*10];
 
 std::vector<uint8_t*> tmp_buffer_depth;
 std::vector<uint8_t*> tmp_buffer_color;
@@ -650,6 +664,48 @@ int dump_sequence_data(const int& frame_dump_start, const int& frame_dump_end)
     return EXIT_SUCCESS;
 }
 
+void dump_default_filter_parameters(std::vector<filter_options>& filters, const char* filename)
+{
+    // dump default filer parameters
+    json filter_options_default_json;
+
+    for (auto& filter : filters){
+        // printf("[%s] parameters:", filter.filter_name.c_str());
+        for (auto& option_slider_pair : filter.supported_options){
+            filter_slider_ui& slider = option_slider_pair.second;
+            if( filter.is_enabled ){
+                filter_options_default_json[filter.filter_name][slider.name] = slider.value;
+                float range[2] = {slider.range.min, slider.range.max};
+                std::string range_name = slider.name + " Range";
+                filter_options_default_json[filter.filter_name][range_name] = range; 
+                // printf(" [%s](%f) [%f-%f]", slider.name.c_str(), slider.value,  slider.range.min, slider.range.max);
+            }
+        }
+        printf("\n");
+    }
+
+    std::ofstream o(filename);
+    o << std::setw(4) << filter_options_default_json << std::endl;
+    o.close();
+}
+
+void update_filter_parameters(std::vector<filter_options>& filters, json& filter_options_json)
+{
+    system("cls");
+    for (auto& filter : filters){
+        printf("[%s] parameters:", filter.filter_name.c_str());
+        for (auto& option_slider_pair : filter.supported_options){
+            filter_slider_ui& slider = option_slider_pair.second;
+            if( filter.is_enabled ){
+                slider.value = filter_options_json[filter.filter_name][slider.name];
+                printf(" [%s](%f) ", slider.name.c_str(), slider.value);
+                filter.filter.set_option(option_slider_pair.first, slider.value);
+            }
+        }
+        printf("\n");
+    }
+}
+
 int filter_test()
 {
     // Parameters
@@ -706,6 +762,10 @@ int filter_test()
     filters.emplace_back("Spatial", spat_filter);
     filters.emplace_back("Temporal", temp_filter);
 
+    char json_filename[128];
+    snprintf(json_filename, sizeof(json_filename), "filter_options.json");
+    dump_default_filter_parameters(filters, json_filename);
+
     int frame_number = 0;
     while (app) // Application still alive?
     {
@@ -737,7 +797,16 @@ int filter_test()
         {
             continue;
         }
+
         // filers
+        if( frame_number % 30 == 0 ){
+            // read from json
+            std::ifstream input(json_filename);
+            json filter_options_json;
+            input >> filter_options_json;
+            input.close();
+            update_filter_parameters(filters, filter_options_json);
+        }
         for (auto&& filter : filters){
             clone_depth_frame = filter.filter.process(clone_depth_frame);
         }
@@ -773,10 +842,10 @@ int filter_test()
         addShow(&raw_depth_frame,     1, "Depth Map", true);
         addShow(&clone_depth_frame,   1, "Depth Map Filtered", true);
 
-        printf("frame:[%d] duration[%d](ms)\n",
-            frame_number,
-            duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
-        );
+        // printf("frame:[%d] duration[%d](ms)\n",
+        //     frame_number,
+        //     duration_cast<milliseconds>(system_clock::now().time_since_epoch()) - timestamp
+        // );
 
         ++frame_number;
     }
@@ -998,4 +1067,18 @@ catch (const std::exception & e)
 {
     std::cerr << e.what() << std::endl;
     return EXIT_FAILURE;
+}
+
+/**
+  Helper function for deciding on int ot float slider
+*/
+bool filter_slider_ui::is_all_integers(const rs2::option_range& range)
+{
+    const auto is_integer = [](float f)
+    {
+        return (fabs(fmod(f, 1)) < std::numeric_limits<float>::min());
+    };
+
+    return is_integer(range.min) && is_integer(range.max) &&
+        is_integer(range.def) && is_integer(range.step);
 }
